@@ -17,7 +17,7 @@ useEffect(() => {
     await refresh();
 
     if (!stopped && !(page === 'Incidents & Forensics' && selected)) {
-      timer = setTimeout(poll, 2000);
+      timer = setTimeout(poll, 5000);
     }
   }
 
