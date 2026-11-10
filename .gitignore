@@ -4,9 +4,6 @@ frontend/node_modules/
 frontend/dist/
 __pycache__/
 *.pyc
-backend/data/*.sqlite3
-backend/data/*.sqlite3-shm
-backend/data/*.sqlite3-wal
 
 # agent: real config holds the API key / DB password; state and logs are per machine
 agent/agent.config.json
@@ -17,3 +14,5 @@ agent/dist/
 agent/agent.lock
 agent/.venv/
 agent/*.spec
+.pytest_cache/
+agent/tests/.tmp/

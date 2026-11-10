@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=8
+httpx>=0.27
+# Optional: lets the database tests start a private PostgreSQL when TEST_DATABASE_URL is not set
+pixeltable-pgserver>=0.4
