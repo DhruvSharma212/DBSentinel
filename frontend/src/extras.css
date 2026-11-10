@@ -1,0 +1,81 @@
+/* Styles added on top of style.css: login gate, notes, drawer forms, and the dashboard refinements. */
+
+/* ---------- login gate ---------- */
+.login-gate { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.login-card { width: min(400px, 100%); display: grid; gap: 14px; padding: 28px; }
+.login-card .brandmark { margin: 0 0 4px; }
+.login-card h3 { font: 600 18px 'Space Grotesk', sans-serif; margin: 0; }
+.login-card p { margin: 0; }
+
+/* ---------- form fields ---------- */
+.login-card input, .author-input {
+  width: 100%; background: #0a1321; border: 1px solid #26354a; border-radius: 7px;
+  padding: 10px 12px; color: #dce8f6; font-size: 12px; outline: 0;
+}
+.author-input { margin-bottom: 10px; }
+.drawer textarea {
+  background: #0a1321; border: 1px solid #26354a; border-radius: 7px; padding: 10px 12px;
+  color: #dce8f6; font: 12px 'DM Sans', sans-serif; outline: 0; margin-bottom: 10px;
+}
+.login-card input:focus, .author-input:focus, .drawer textarea:focus { border-color: #43d9e8; }
+
+/* ---------- investigation notes ---------- */
+.note-item { border: 1px solid #26364a; background: #111f30; border-radius: 7px; padding: 10px 12px; margin-bottom: 8px; }
+.note-item div { display: flex; justify-content: space-between; gap: 10px; }
+.note-item b { font-size: 11px; }
+.note-item span { color: #71839b; font-size: 10px; }
+.note-item p { margin: 8px 0 0; font-size: 11px; line-height: 1.6; color: #b7c6d9; }
+.response-evidence b div { margin-bottom: 4px; }
+
+/* ---------- metric tiles: threshold state + trend line ---------- */
+.metric { position: relative; transition: border-color .2s, box-shadow .2s; }
+.metric.lvl-ok .progress i { background: #43d9e8; }
+.metric.lvl-warn { border-color: #5b4a2b; box-shadow: inset 3px 0 0 #f5ad62; }
+.metric.lvl-warn .progress i { background: #f5ad62; }
+.metric.lvl-warn .metric-value { color: #ffd9a8; }
+.metric.lvl-crit { border-color: #6a2f3c; box-shadow: inset 3px 0 0 #fb7185; }
+.metric.lvl-crit .progress i { background: #fb7185; }
+.metric.lvl-crit .metric-value { color: #ffb4c0; }
+.metric .spark { width: 64px; height: 22px; flex-shrink: 0; margin-left: auto; opacity: .9; }
+
+/* ---------- compact tables and in-cell bars ---------- */
+table.compact { width: 100%; }
+table.compact th { padding: 8px 6px; }
+table.compact td { padding: 9px 6px; vertical-align: middle; }
+table.compact td small { display: block; color: #71839b; font-size: 9px; margin-top: 3px; }
+.barcell { display: grid; grid-template-columns: 34px minmax(40px, 1fr); align-items: center; gap: 8px; min-width: 92px; }
+.barcell span { font-variant-numeric: tabular-nums; text-align: right; }
+.minibar { height: 4px; background: #243044; border-radius: 3px; overflow: hidden; }
+.minibar i { display: block; height: 100%; background: #43d9e8; border-radius: 3px; }
+.minibar.warn i { background: #f5ad62; }
+.minibar.crit i { background: #fb7185; }
+
+/* ---------- layout variants ---------- */
+.bottom-grid.three { grid-template-columns: 1.25fr 1.1fr 1fr; }
+.charts-grid.single { grid-template-columns: 1fr; }
+.orange-dot { background: #f5ad62; }
+@media (max-width: 1200px) { .bottom-grid.three { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 850px) { .bottom-grid.three { grid-template-columns: 1fr; } }
+
+/* ---------- hero status reflects the situation ---------- */
+.hero-status.warn { border-color: #5b4a2b; background: #20190f; color: #f5ad62; }
+.hero-status.alert { border-color: #6a2f3c; background: #24131a; color: #fb7185; }
+
+/* ---------- summary row (Incidents) ---------- */
+.stat-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 13px; margin-bottom: 17px; }
+.stat { padding: 14px 16px; display: grid; gap: 4px; }
+.stat span { font: 500 9px 'DM Mono', monospace; letter-spacing: .6px; color: #8c9ab0; text-transform: uppercase; }
+.stat b { font: 600 24px 'Space Grotesk', sans-serif; letter-spacing: -.5px; color: #edf5ff; }
+.stat small { color: #71839b; font-size: 10px; }
+.stat.alert { border-color: #6a2f3c; box-shadow: inset 3px 0 0 #fb7185; }
+@media (max-width: 850px) { .stat-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ---------- footer ---------- */
+footer .mono { font: 10px 'DM Mono', monospace; color: #53647d; margin: 0; }
+.updated { min-width: 112px; }
+
+/* ---------- keyboard focus ---------- */
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, .navitem:focus-visible {
+  outline: 2px solid #43d9e8; outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

@@ -5,6 +5,7 @@
     python agent.py --once          send one snapshot and exit 0/1 (connectivity + key check)
     python agent.py --config FILE   use a specific config file
     python agent.py --background    no console window, log to agent.log only (used by the auto-start task)
+    python agent.py --setup         guided setup: asks a few questions and writes agent.config.json
 """
 import argparse
 import json
@@ -23,8 +24,10 @@ from urllib.parse import urlparse
 import psutil
 
 from collector import DatabaseProbe, OSCollector
+import tui
+from wizard import run_setup
 
-AGENT_VERSION = "0.1.0"
+AGENT_VERSION = "0.2.0"
 log = logging.getLogger("dbsentinel-agent")
 
 
@@ -130,12 +133,21 @@ def launcher_process():
         return None
 
 
-def run(cfg, device_id):
+def run(cfg, device_id, show_banner=False):
     launcher = launcher_process()
     collector = OSCollector()
     probe = DatabaseProbe(cfg["postgres"]["enabled"], cfg["postgres"]["dsn"], cfg["postgres"]["send_query_text"])
     time.sleep(1.0)  # let the primed CPU counters accumulate a real first interval
     interval, fails, sent = cfg["interval_seconds"], 0, 0
+    if show_banner:
+        screen = tui.Console()
+        screen.header("Agent", f"v{AGENT_VERSION}")
+        screen.write()
+        screen.kv([("Device", f"{cfg['device_name']}  ({device_id})"), ("Server", cfg["api_url"]),
+                   ("Interval", f"every {interval:g} s"), ("PostgreSQL", "monitored" if probe.enabled else "not monitored")])
+        screen.write()
+        screen.note("Press Ctrl+C to stop.")
+        screen.write()
     log.info("Agent %s started: device %s (%s) -> %s every %gs; PostgreSQL monitoring %s",
              AGENT_VERSION, device_id, cfg["device_name"], cfg["api_url"], interval,
              "on" if probe.enabled else "off")
@@ -172,14 +184,16 @@ def setup_logging(verbose, console=True):
     level = logging.DEBUG if verbose else logging.INFO
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     handlers = []
+    stream = None
     if console and sys.stderr is not None:
-        handlers.append(logging.StreamHandler())
+        stream = logging.StreamHandler(sys.stdout if sys.stdout is not None else sys.stderr)
+        handlers.append(stream)
     try:
         handlers.append(logging.handlers.RotatingFileHandler(app_dir() / "agent.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8"))
     except OSError:
         pass
     for h in handlers:
-        h.setFormatter(fmt)
+        h.setFormatter(tui.ConsoleFormatter(tui.Console(stream=h.stream)) if h is stream else fmt)
         log.addHandler(h)
     log.setLevel(level)
 
@@ -225,7 +239,61 @@ def make_probe(cfg):
     return DatabaseProbe(pg["enabled"], pg["dsn"], pg["send_query_text"])
 
 
+def launched_from_explorer():
+    """True when this process owns its console window alone (double-clicked), so the window would vanish on exit."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        slots = (ctypes.c_uint * 8)()
+        count = ctypes.windll.kernel32.GetConsoleProcessList(slots, 8)
+        # a one-file exe is a launcher plus the real agent (2 processes); from source it is one
+        return count <= (2 if getattr(sys, "frozen", False) else 1)
+    except Exception:
+        return False
+
+
+def pause_before_exit():
+    if launched_from_explorer() and sys.stdin is not None and sys.stdin.isatty():
+        try:
+            input("\nPress Enter to close this window...")
+        except EOFError:
+            pass
+
+
+def run_wizard(args):
+    def send_test(config_path):
+        cfg = load_config(config_path)
+        collector = OSCollector()
+        time.sleep(1.0)
+        probe = make_probe(cfg)
+        try:
+            return send(cfg, build_payload(cfg, load_device_id(app_dir() / "agent.state.json"), collector, probe))
+        finally:
+            probe.close()
+
+    def probe_snapshot(dsn):
+        probe = DatabaseProbe(True, dsn)
+        try:
+            return probe.snapshot()
+        finally:
+            probe.close()
+
+    return run_setup(args.config, send_test, probe_snapshot, app_dir(), frozen=getattr(sys, "frozen", False), version=AGENT_VERSION)
+
+
 def execute(args):
+    interactive = sys.stdin is not None and sys.stdin.isatty()
+    first_run = not args.config.exists() and interactive and not (args.once or args.dry_run or args.background)
+    if args.setup or first_run:
+        try:
+            outcome = run_wizard(args)
+        except (EOFError, KeyboardInterrupt):
+            print("\nSetup cancelled.")
+            return 1
+        if outcome != "run":
+            pause_before_exit()
+            return 0
     cfg = load_config(args.config)
     device_id = load_device_id(app_dir() / "agent.state.json")
 
@@ -248,7 +316,7 @@ def execute(args):
     if not acquire_single_instance(app_dir() / "agent.lock"):
         log.error("Another DBSentinel agent is already running from %s; exiting.", app_dir())
         return 3
-    run(cfg, device_id)
+    run(cfg, device_id, show_banner=not args.background)
     return 0
 
 
@@ -259,6 +327,7 @@ def main():
     parser.add_argument("--once", action="store_true", help="send one snapshot and exit (0 = accepted)")
     parser.add_argument("--background", action="store_true",
                         help="no console window; log to agent.log only (used by the auto-start task)")
+    parser.add_argument("--setup", action="store_true", help="guided setup: asks a few questions and writes the config file")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     setup_logging(args.verbose, console=not args.background)
