@@ -21,14 +21,16 @@ Not sent: file contents, browsing data, keystrokes, or the PostgreSQL password. 
 
 ## Quick start
 
-You need two values from whoever runs the DBSentinel server: its **address** (for example `https://dbsentinel.onrender.com`) and the **ingest key** (the server's `INGEST_KEY`).
+You need two things from whoever runs the DBSentinel server: its **address** (for example `https://dbsentinel.onrender.com`) and a **one-time enrollment code** such as `K7P2-9XQM-4TWH` (created in the dashboard under Settings → Device access). If they sent you a ready-made zip, the address and code are already inside and you only double-click the exe.
 
 1. Put `dbsentinel-agent.exe` in a folder you will keep, for example `C:\DBSentinel-Agent`.
-2. Double-click it (or run it from a terminal). With no configuration yet it opens a short **guided setup**:
+2. Double-click it (or run it from a terminal).
+   - **Ready-made zip** (it contains `agent.config.json`): the agent registers this computer by itself, then asks only whether to start at every Windows login. Press Enter for yes.
+   - **No configuration yet:** it opens a short **guided setup**:
 
    | Step | What it asks |
    |---|---|
-   | 1 Server | the server address and the ingest key (typing is masked) |
+   | 1 Server | the server address and the enrollment code. Press Enter at the code prompt to use the shared ingest key instead (typing is masked) |
    | 2 This computer | the name to show in the dashboard (default: the computer name) |
    | 3 PostgreSQL | whether a PostgreSQL runs on this computer. If yes: host, port, user, password and database. It connects right away and shows the result before saving |
    | 4 Connection check | sends one snapshot to the server and reports whether it was accepted |
@@ -64,7 +66,9 @@ By default the agent runs with your normal rights, which is enough for most data
 | Key | Default | Meaning |
 |---|---|---|
 | `api_url` | required | Server address, no trailing path. Must be `https://...` unless it points to localhost |
-| `api_key` | required | The server's `INGEST_KEY` |
+| `enroll_code` | one of the three | A one-time code from the dashboard. On first start the agent trades it for a `device_token`, writes that into this file and deletes the code |
+| `device_token` | one of the three | This computer's own token (written by the agent after enrolling). Revocable by the administrator |
+| `api_key` | one of the three | The server's shared `INGEST_KEY`. Works only while the server still allows it |
 | `device_name` | computer name | Name shown in the dashboard |
 | `interval_seconds` | `5` | Seconds between snapshots (minimum 2) |
 | `request_timeout_seconds` | `30` | How long to wait for the server. Free hosting can take up to a minute to wake up |
@@ -73,7 +77,7 @@ By default the agent runs with your normal rights, which is enough for most data
 | `postgres.dsn` | empty | Connection string of the local PostgreSQL. With an empty DSN the dashboard shows "not configured" and raises no alert |
 | `postgres.send_query_text` | `true` | `false` hides SQL text |
 
-The environment variables `DBSENTINEL_API_URL`, `DBSENTINEL_API_KEY` and `DBSENTINEL_PG_DSN` override the file. That lets you keep secrets out of it.
+The environment variables `DBSENTINEL_API_URL`, `DBSENTINEL_ENROLL_CODE`, `DBSENTINEL_DEVICE_TOKEN`, `DBSENTINEL_API_KEY` and `DBSENTINEL_PG_DSN` override the file. That lets you keep secrets out of it.
 
 ### Monitoring PostgreSQL
 
@@ -112,7 +116,11 @@ Files created next to the exe: `agent.state.json` (the device id; keep it, or th
 
 | Message or symptom | Cause and fix |
 |---|---|
-| `HTTP 401 ... the API key was rejected` | `api_key` does not match the server's `INGEST_KEY` |
+| `Invalid, used, revoked or expired enrollment code` | A code works once and expires (24 hours by default). Ask for a new one, then run the agent with `--setup` |
+| `HTTP 401 ... access was revoked` | The administrator cut this computer off. Ask for a new code and run `--setup` |
+| `HTTP 401 ... device token was not accepted` | The token in `agent.config.json` is unknown to the server (for example the server was reset). Run `--setup` with a new code |
+| `HTTP 403 ... another device` | `agent.state.json` was deleted or copied from another computer, so the device id no longer matches the token. Run `--setup` |
+| `HTTP 401 ... the API key was rejected` | `api_key` does not match the server's `INGEST_KEY`, or the server no longer allows the shared key |
 | `HTTP 503 ... INGEST_KEY is not configured` | The server has no `INGEST_KEY` set yet |
 | `cannot reach https://...` | No internet, wrong `api_url`, or the free server is waking up. The agent keeps retrying |
 | `config file not found` | `agent.config.json` is not in the same folder as the exe, or pass `--config` |
@@ -120,6 +128,16 @@ Files created next to the exe: `agent.state.json` (the device id; keep it, or th
 | Dashboard says PostgreSQL "disconnected" | Read the message next to it, such as a wrong password or a PostgreSQL service that is not running |
 | Dashboard says "limited visibility" | Grant `pg_monitor` to the monitoring role |
 | Laptop missing from the dropdown | Run `--once` and read the result. Check `agent.log` |
+
+## Make a ready-to-run zip for one person
+
+After `build.ps1` has produced `dist\`, create a code in the dashboard (Settings → Device access) and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\make-package.ps1 -Server https://dbsentinel.onrender.com -Code K7P2-9XQM-4TWH -Name "Rahul"
+```
+
+This writes `DBSentinel-Agent-Rahul.zip` in the current folder with the exe, the docs and an `agent.config.json` that holds only the server address, the code and the name. The code works once and expires; after the first start the agent replaces it with its own token. Send the zip only to that person and never commit it.
 
 ## Build the exe yourself
 
@@ -130,6 +148,6 @@ cd agent
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-This creates `agent\dist\` with `dbsentinel-agent.exe`, the config example, the two auto-start scripts and this README. Zip that folder to give it to someone else.
+This creates `agent\dist\` with `dbsentinel-agent.exe`, the config example, the auto-start scripts, `make-package.ps1`, `START-HERE.txt` and this README.
 
 To run from source instead: `pip install -r requirements.txt`, then `python agent.py`.

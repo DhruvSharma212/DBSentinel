@@ -25,7 +25,7 @@ class Script:
         return self.secrets.pop(0)
 
 
-def run(tmp_path, send_ok=True, probe=None, frozen=False, script_dir=None):
+def run(tmp_path, send_ok=True, probe=None, frozen=False, script_dir=None, enroll=None):
     probe = probe or (lambda dsn: {"connected": True, "message": "Connected to PostgreSQL 16"})
     sent = []
 
@@ -33,7 +33,7 @@ def run(tmp_path, send_ok=True, probe=None, frozen=False, script_dir=None):
         sent.append(json.loads(path.read_text(encoding="utf-8")))
         return (True, "HTTP 200") if send_ok else (False, "HTTP 401 - key rejected")
 
-    result = wizard.run_setup(tmp_path / "agent.config.json", send_test, probe, script_dir or tmp_path, frozen=frozen)
+    result = wizard.run_setup(tmp_path / "agent.config.json", send_test, probe, script_dir or tmp_path, frozen=frozen, enroll=enroll)
     return result, sent
 
 
@@ -135,3 +135,54 @@ def test_run_now_answer_is_returned(tmp_path, monkeypatch):
                                     ("a.example", False), ("", False)])
 def test_url_rules(url, ok):
     assert (wizard.url_problem(url) is None) is ok
+
+
+# ---------------------------------------------------------------- enrollment codes
+def test_an_enrollment_code_replaces_the_shared_key(tmp_path, monkeypatch):
+    calls = []
+
+    def enroll(url, code):
+        calls.append((url, code))
+        return True, "enrolled", "dst_issued", "Rahul"
+
+    # url, code, name (default = the label), PostgreSQL? no, run now? no   -- and no secret is ever asked for
+    s = Script(monkeypatch, lines=["", "K7P2-9XQM-4TWH", "", "n", "n"], secrets=[])
+    result, sent = run(tmp_path, enroll=enroll)
+    cfg = saved(tmp_path)
+    assert result == "done" and calls == [(wizard.DEFAULT_API_URL, "K7P2-9XQM-4TWH")]
+    assert cfg["device_token"] == "dst_issued" and "api_key" not in cfg and cfg["device_name"] == "Rahul"
+    assert not any("Ingest key" in q for q in s.asked)
+    assert sent and sent[0]["device_token"] == "dst_issued"                           # the connection check used the token
+
+
+def test_a_bad_code_can_be_corrected_or_replaced_by_the_key(tmp_path, monkeypatch, capsys):
+    attempts = []
+
+    def enroll(url, code):
+        attempts.append(code)
+        return False, "HTTP 401: Invalid, used, revoked or expired enrollment code.", "", ""
+
+    # code too short (re-asked), a well-formed but refused code, then Enter -> falls back to the ingest key
+    s = Script(monkeypatch, lines=["", "abc", "AAAA-AAAA-AAAA", "", "", "n", "n"], secrets=["the-key"])
+    run(tmp_path, enroll=enroll)
+    cfg = saved(tmp_path)
+    assert attempts == ["AAAA-AAAA-AAAA"] and cfg["api_key"] == "the-key" and "device_token" not in cfg
+    assert "expired enrollment code" in capsys.readouterr().out
+    assert sum("Enrollment code" in q for q in s.asked) == 3
+
+
+def test_summary_says_how_the_device_authenticates(tmp_path, monkeypatch, capsys):
+    Script(monkeypatch, lines=["", "K7P2-9XQM-4TWH", "", "n", "n"], secrets=[])
+    run(tmp_path, enroll=lambda url, code: (True, "enrolled", "dst_issued", ""))
+    assert "own device token" in capsys.readouterr().out
+    (tmp_path / "agent.config.json").unlink()
+    Script(monkeypatch, lines=["", "", "", "n", "n"], secrets=["k"])
+    run(tmp_path, enroll=lambda url, code: (True, "enrolled", "", ""))
+    assert "shared ingest key" in capsys.readouterr().out
+
+
+def test_code_format_rules():
+    assert wizard.code_problem("") is None
+    assert wizard.code_problem("K7P2-9XQM-4TWH") is None
+    assert wizard.code_problem("k7p2 9xqm 4twh") is None
+    assert wizard.code_problem("K7P2") is not None

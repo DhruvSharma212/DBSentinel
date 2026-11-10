@@ -5,7 +5,8 @@
       powershell -ExecutionPolicy Bypass -File .\build.ps1
 
   Output: agent\dist\dbsentinel-agent.exe, plus the config example, the auto-start scripts and the README,
-  so the dist folder can be zipped and copied to the laptop you want to monitor.
+  so the dist folder can be zipped and copied to the laptop you want to monitor
+  (or use make-package.ps1 to build a per-person zip that needs no typing).
 #>
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -28,8 +29,9 @@ Write-Host 'Building dbsentinel-agent.exe...'
     --specpath build --workpath build\work --distpath dist agent.py
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
 
-foreach ($f in 'agent.config.example.json', 'install-autostart.ps1', 'uninstall-autostart.ps1', 'README.md') {
+foreach ($f in 'agent.config.example.json', 'install-autostart.ps1', 'uninstall-autostart.ps1', 'make-package.ps1', 'README.md') {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $f) -Destination 'dist' -Force
 }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'package\START-HERE.txt') -Destination 'dist' -Force
 Write-Host ''
 Write-Host "Done: $(Join-Path $PSScriptRoot 'dist\dbsentinel-agent.exe')"
