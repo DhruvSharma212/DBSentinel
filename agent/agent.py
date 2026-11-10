@@ -6,6 +6,8 @@
     python agent.py --config FILE   use a specific config file
     python agent.py --background    no console window, log to agent.log only (used by the auto-start task)
     python agent.py --setup         guided setup: asks a few questions and writes agent.config.json
+    python agent.py --install-autostart   start the agent at every Windows login (packaged exe)
+    python agent.py --uninstall     stop the agent, remove auto-start and (optionally) its saved settings
 
 Credentials (config file or DBSENTINEL_* variables): enroll_code (one-time code from the dashboard, traded for a
 device_token on first start), device_token, or the shared api_key.
@@ -28,9 +30,10 @@ import psutil
 
 from collector import DatabaseProbe, OSCollector
 import tui
+import autostart
 from wizard import lock_down, offer_autostart, run_setup
 
-AGENT_VERSION = "0.3.0"
+AGENT_VERSION = "0.4.0"
 log = logging.getLogger("dbsentinel-agent")
 
 
@@ -270,7 +273,7 @@ def run(cfg, device_id, show_banner=False):
         probe.close()
 
 
-def setup_logging(verbose, console=True):
+def setup_logging(verbose, console=True, to_file=True):
     level = logging.DEBUG if verbose else logging.INFO
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     handlers = []
@@ -279,7 +282,8 @@ def setup_logging(verbose, console=True):
         stream = logging.StreamHandler(sys.stdout if sys.stdout is not None else sys.stderr)
         handlers.append(stream)
     try:
-        handlers.append(logging.handlers.RotatingFileHandler(app_dir() / "agent.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8"))
+        if to_file:
+            handlers.append(logging.handlers.RotatingFileHandler(app_dir() / "agent.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8"))
     except OSError:
         pass
     for h in handlers:
@@ -351,6 +355,102 @@ def pause_before_exit():
             pass
 
 
+def cmd_install_autostart():
+    screen = tui.Console()
+    if not getattr(sys, "frozen", False):
+        screen.fail("Auto-start can only be set up from the packaged dbsentinel-agent.exe.")
+        return 1
+    ok, message = autostart.install(Path(sys.executable))
+    (screen.ok if ok else screen.fail)(message)
+    return 0 if ok else 1
+
+
+def cmd_uninstall(assume_yes):
+    """Stop the agent, remove auto-start and, if wanted, the settings it saved next to the exe."""
+    screen = tui.Console()
+    screen.header("Agent uninstall", f"v{AGENT_VERSION}")
+    screen.write()
+    frozen = getattr(sys, "frozen", False)
+    ok, message = autostart.uninstall()
+    (screen.ok if ok else screen.fail)(message)
+    if frozen:
+        stopped = autostart.stop_running_agents(Path(sys.executable))
+        screen.ok(f"Stopped {stopped} running agent{'s' if stopped != 1 else ''}." if stopped else "No agent was running.")
+    files = autostart.settings_files(app_dir())
+    if files:
+        screen.write()
+        screen.note("Saved by the agent in this folder: " + ", ".join(f.name for f in files))
+        delete = assume_yes
+        if not assume_yes:
+            try:
+                answer = input(screen.yes_no_text("Delete these saved settings and logs too?", True)).strip().lower()
+                delete = answer in ("", "y", "yes")
+            except EOFError:
+                delete = False
+        if delete:
+            deleted, failed = autostart.delete_settings(app_dir())
+            if deleted:
+                screen.ok("Deleted " + ", ".join(deleted))
+            if failed:
+                screen.warn("Could not delete " + ", ".join(failed) + " (is another agent still running?)")
+    screen.write()
+    screen.note("Done. You can now delete dbsentinel-agent.exe. The administrator can also revoke this computer in the dashboard.")
+    return 0 if ok else 1
+
+
+MENU_ITEMS = ("Run the agent in this window", "{autostart}", "Change settings (run the setup again)",
+              "Uninstall (stop the agent and remove it)", "Quit")
+
+
+def show_menu(args):
+    """What opening an already set-up dbsentinel-agent.exe shows: status, then a few choices.
+    Returns "run" when the user wants the agent started in this window, otherwise "quit"."""
+    screen = tui.Console()
+    exe = Path(sys.executable)
+    while True:
+        installed = autostart.is_installed()
+        running = autostart.count_running_agents(exe)
+        try:
+            cfg = load_config(args.config)
+            device, server = cfg["device_name"], cfg["api_url"]
+        except ConfigError:
+            device = server = "(not configured)"
+        screen.header("Agent", f"v{AGENT_VERSION}")
+        screen.write()
+        screen.kv([("Device", device), ("Server", server), ("Auto-start", "on" if installed else "off"),
+                   ("Running now", "yes, in the background" if running else "no")])
+        screen.write()
+        for number, text in enumerate(MENU_ITEMS, 1):
+            label = text.format(autostart="Turn auto-start off" if installed else "Turn auto-start on")
+            screen.line(screen.paint(f"{number}", "accent", bold=True) + "  " + label)
+        screen.write()
+        try:
+            choice = input(screen.prompt_text("Choose", hint="Enter to quit")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return "quit"
+        if choice in ("", "5", "q", "quit"):
+            return "quit"
+        if choice == "1":
+            if running:
+                screen.note("The agent is already running in the background, so there is nothing to start.")
+                continue
+            return "run"
+        if choice == "2":
+            ok, message = autostart.uninstall() if installed else autostart.install(exe)
+            (screen.ok if ok else screen.fail)(message)
+        elif choice == "3":
+            try:
+                if run_wizard(args) == "run":
+                    return "run"
+            except (EOFError, KeyboardInterrupt):
+                screen.note("Setup cancelled.")
+        elif choice == "4":
+            cmd_uninstall(False)
+            return "quit"
+        else:
+            screen.problem("Please choose a number from 1 to 5.")
+
+
 def run_wizard(args):
     def send_test(config_path):
         cfg = load_config(config_path)
@@ -372,7 +472,7 @@ def run_wizard(args):
     def enroll_with_code(api_url, code):
         return enroll(api_url, code, load_device_id(app_dir() / "agent.state.json"))
 
-    return run_setup(args.config, send_test, probe_snapshot, app_dir(), frozen=getattr(sys, "frozen", False),
+    return run_setup(args.config, send_test, probe_snapshot, frozen=getattr(sys, "frozen", False),
                      version=AGENT_VERSION, enroll=enroll_with_code)
 
 
@@ -397,6 +497,12 @@ def enroll_on_start(cfg, args, device_id, announce):
 
 def execute(args):
     interactive = tui.stdin_is_console()
+    plain_start = not (args.once or args.dry_run or args.background or args.setup)
+    # An already set-up packaged exe opened by a person shows a menu instead of silently running.
+    if (getattr(sys, "frozen", False) and interactive and plain_start and args.config.exists()
+            and (app_dir() / "agent.state.json").exists()):
+        if show_menu(args) != "run":
+            return 0
     first_run = not args.config.exists() and interactive and not (args.once or args.dry_run or args.background)
     if args.setup or first_run:
         try:
@@ -427,7 +533,7 @@ def execute(args):
         return 4
     if announce and first_launch and getattr(sys, "frozen", False):
         try:
-            offer_autostart(app_dir(), tui.Console())    # a pre-filled package skips the wizard, so ask here
+            offer_autostart(tui.Console())               # a ready-made configuration skips the wizard, so ask here
         except (EOFError, KeyboardInterrupt):
             pass                                           # nobody is there to answer: carry on without auto-start
     if args.once:
@@ -453,12 +559,21 @@ def main():
     parser.add_argument("--background", action="store_true",
                         help="no console window; log to agent.log only (used by the auto-start task)")
     parser.add_argument("--setup", action="store_true", help="guided setup: asks a few questions and writes the config file")
+    parser.add_argument("--install-autostart", action="store_true", help="start the agent at every Windows login (packaged exe)")
+    parser.add_argument("--uninstall", action="store_true", help="stop the agent, remove auto-start and optionally its saved settings")
+    parser.add_argument("--yes", action="store_true", help="with --uninstall: do not ask, delete the saved settings too")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    setup_logging(args.verbose, console=not args.background)
+    setup_logging(args.verbose, console=not args.background, to_file=not args.uninstall)
     if args.background:
         detach_console()
     try:
+        if args.install_autostart:
+            return cmd_install_autostart()
+        if args.uninstall:
+            code = cmd_uninstall(args.yes)
+            pause_before_exit()
+            return code
         return execute(args)
     except ConfigError as exc:
         log.error("%s", exc)

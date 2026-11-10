@@ -21,45 +21,48 @@ Not sent: file contents, browsing data, keystrokes, or the PostgreSQL password. 
 
 ## Quick start
 
-You need two things from whoever runs the DBSentinel server: its **address** (for example `https://dbsentinel.onrender.com`) and a **one-time enrollment code** such as `K7P2-9XQM-4TWH` (created in the dashboard under Settings → Device access). If they sent you a ready-made zip, the address and code are already inside and you only double-click the exe.
+You need two things from whoever runs the DBSentinel server: its **address** (for example `https://dbsentinel.onrender.com`, already suggested by the program) and a **one-time enrollment code** such as `K7P2-9XQM-4TWH` (created in the dashboard under Settings → Device access).
+
+`dbsentinel-agent.exe` is the only file you need. It sets itself up, installs and removes its own auto-start, and uninstalls itself.
 
 1. Put `dbsentinel-agent.exe` in a folder you will keep, for example `C:\DBSentinel-Agent`.
-2. Double-click it (or run it from a terminal).
-   - **Ready-made zip** (it contains `agent.config.json`): the agent registers this computer by itself, then asks only whether to start at every Windows login. Press Enter for yes.
-   - **No configuration yet:** it opens a short **guided setup**:
+2. Double-click it. The first time, a short **guided setup** opens:
 
    | Step | What it asks |
    |---|---|
-   | 1 Server | the server address and the enrollment code. Press Enter at the code prompt to use the shared ingest key instead (typing is masked) |
-   | 2 This computer | the name to show in the dashboard (default: the computer name) |
+   | 1 Server | the server address (Enter keeps the suggestion) and the enrollment code. Press Enter at the code prompt to use the shared ingest key instead (typing is masked) |
+   | 2 This computer | the name to show in the dashboard (default: the code's label, or the computer name) |
    | 3 PostgreSQL | whether a PostgreSQL runs on this computer. If yes: host, port, user, password and database. It connects right away and shows the result before saving |
    | 4 Connection check | sends one snapshot to the server and reports whether it was accepted |
-   | 5 Startup | whether to start the agent at every Windows login (installs the scheduled task for you) |
+   | 5 Startup | whether to start the agent at every Windows login (Enter for yes) |
 
-   It then shows a summary and asks whether to run the agent now. The settings go into `agent.config.json` next to the exe, and the file is restricted to your Windows user because it holds the key and the database password.
+   It then shows a summary. The settings go into `agent.config.json` next to the exe, and the file is restricted to your Windows user because it holds the token and the database password.
 3. Open the dashboard. Your laptop appears in the device dropdown within a few seconds.
 
-To change the settings later, run `dbsentinel-agent.exe --setup`, or edit `agent.config.json` by hand (see below). To check the connection at any time: `dbsentinel-agent.exe --once` should print `Accepted by the API: HTTP 200`.
+### Opening it again: the menu
 
-The wizard uses colours when the terminal supports them and falls back to plain text otherwise (for example when output is redirected, or when the `NO_COLOR` environment variable is set).
+Once it is set up, opening `dbsentinel-agent.exe` shows what it is doing and a menu:
 
-Windows may show a "Windows protected your PC" (SmartScreen) or antivirus warning for the first run, because the exe is unsigned. Only run an exe you built yourself or got from someone you trust. If the exe arrived in a zip downloaded from a browser or chat app, right-click the zip, choose Properties and tick **Unblock** before extracting.
+```
+Device       Rahul
+Server       https://dbsentinel.onrender.com
+Auto-start   on
+Running now  yes, in the background
 
-### Start automatically at login
-
-The guided setup offers this in step 5. To do it later, in the folder that holds the exe and `agent.config.json` run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install-autostart.ps1
+1  Run the agent in this window
+2  Turn auto-start off
+3  Change settings (run the setup again)
+4  Uninstall (stop the agent and remove it)
+5  Quit
 ```
 
-This creates a Scheduled Task called **DBSentinel Agent** that starts the agent at every logon, in the background with no window, and starts it once right now. It writes `agent.log` next to the exe. Remove it with:
+Press Enter (or 5) to just close it. The agent keeps running in the background if auto-start is on.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\uninstall-autostart.ps1
-```
+### Uninstall
 
-By default the agent runs with your normal rights, which is enough for most data. Windows hides a few protected system processes from non-administrators, so their CPU and I/O read as 0 and snapshots take slightly longer. To read everything, run `install-autostart.ps1 -RunElevated` from an **Administrator** PowerShell.
+Open the exe and choose **4**, or run `dbsentinel-agent.exe --uninstall`. It stops the running agent, removes the auto-start task and, if you agree, deletes `agent.config.json`, `agent.state.json` and the log from the folder. Then delete `dbsentinel-agent.exe` itself. The administrator can also **revoke** your computer in the dashboard at any time.
+
+Windows may show a "Windows protected your PC" (SmartScreen) or antivirus warning for the first run, because the exe is unsigned. Only run an exe you built yourself or got from someone you trust. If it arrived in a zip downloaded from a browser or chat app, right-click the zip, choose Properties and tick **Unblock** before extracting.
 
 ## Configuration (`agent.config.json`)
 
@@ -98,6 +101,8 @@ Then set `"dsn": "postgresql://dbsentinel_monitor:choose-a-password@localhost:54
 |---|---|
 | `dbsentinel-agent.exe` | Run until stopped |
 | `dbsentinel-agent.exe --setup` | Run the guided setup again |
+| `dbsentinel-agent.exe --install-autostart` | Start the agent at every Windows login (no administrator rights needed) |
+| `dbsentinel-agent.exe --uninstall` | Stop the agent, remove auto-start and, after asking, its saved settings. Add `--yes` to skip the question |
 | `dbsentinel-agent.exe --once` | Send one snapshot and exit. Exit code 0 means the server accepted it |
 | `dbsentinel-agent.exe --dry-run` | Print one snapshot as JSON without sending it. This is exactly what would be sent |
 | `dbsentinel-agent.exe --background` | No window, log to file only (what the auto-start task uses) |
@@ -129,16 +134,6 @@ Files created next to the exe: `agent.state.json` (the device id; keep it, or th
 | Dashboard says "limited visibility" | Grant `pg_monitor` to the monitoring role |
 | Laptop missing from the dropdown | Run `--once` and read the result. Check `agent.log` |
 
-## Make a ready-to-run zip for one person
-
-After `build.ps1` has produced `dist\`, create a code in the dashboard (Settings → Device access) and run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\make-package.ps1 -Server https://dbsentinel.onrender.com -Code K7P2-9XQM-4TWH -Name "Rahul"
-```
-
-This writes `DBSentinel-Agent-Rahul.zip` in the current folder with the exe, the docs and an `agent.config.json` that holds only the server address, the code and the name. The code works once and expires; after the first start the agent replaces it with its own token. Send the zip only to that person and never commit it.
-
 ## Build the exe yourself
 
 You need Windows and Python 3.10 or newer.
@@ -148,6 +143,4 @@ cd agent
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-This creates `agent\dist\` with `dbsentinel-agent.exe`, the config example, the auto-start scripts, `make-package.ps1`, `START-HERE.txt` and this README.
-
-To run from source instead: `pip install -r requirements.txt`, then `python agent.py`.
+This creates `agent\dist\dbsentinel-agent.exe` (the whole product) and `agent\dist\DBSentinel-Agent.zip` (the same exe, zipped for chat or e-mail). To run from source instead: `pip install -r requirements.txt`, then `python agent.py`.

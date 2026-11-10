@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
+import autostart
 import tui
 
 DEFAULT_API_URL = "https://dbsentinel.onrender.com"
@@ -95,31 +96,29 @@ def lock_down(path):
         pass
 
 
-def offer_autostart(script_dir, console=None):
-    """Ask whether to start the agent at every Windows login and, if so, install the scheduled task.
-    Only for the packaged exe on Windows. Returns True when the task was installed."""
+def offer_autostart(console=None):
+    """Ask whether to start the agent at every Windows login and, if so, register it. Only for the packaged
+    exe on Windows. Returns True when auto-start was set up."""
     import sys
-    script = Path(script_dir) / "install-autostart.ps1"
-    if not (getattr(sys, "frozen", False) and _on_windows() and script.exists()):
+    if not (getattr(sys, "frozen", False) and _on_windows()):
         return False
-    return _ask_autostart(script, console)
+    return _ask_autostart(console)
 
 
-def _ask_autostart(script, console=None):
+def _ask_autostart(console=None):
+    import sys
     global ui
     if console is not None:
         ui = console
     ui.write()
     if not yes_no("Start the agent automatically whenever you log in to Windows?", default=True):
         return False
-    done = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                          capture_output=True, text=True)
-    text = (done.stdout or done.stderr).strip()
-    (ui.ok if done.returncode == 0 else ui.warn)(text.splitlines()[-1] if text else "Auto-start finished")
-    return done.returncode == 0
+    ok, message = autostart.install(Path(sys.executable))
+    (ui.ok if ok else ui.warn)(message)
+    return ok
 
 
-def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False, console=None, version="", enroll=None):
+def run_setup(config_path, send_test, probe_snapshot, frozen=False, console=None, version="", enroll=None):
     """Run the wizard. Returns "run" (start the agent in this window), "autostart" (task installed and started),
     "done" (config saved, nothing started) or "cancel" (nothing changed).
 
@@ -207,23 +206,23 @@ def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False, 
         return "done"
 
     # ---------------------------------------------------------------- 5. startup
-    autostart = False
-    script = Path(script_dir) / "install-autostart.ps1"
-    if frozen and _on_windows() and script.exists():
+    started_at_login = False
+    if frozen and _on_windows():
         ui.section(5, "Startup")
-        ui.write()
-        autostart = _ask_autostart(script, ui)
+        started_at_login = _ask_autostart(ui)
 
     ui.panel("Summary", [
         ("Server", api_url),
         ("Device", device_name),
         ("Access", "own device token" if "device_token" in credentials else "shared ingest key"),
         ("PostgreSQL", "monitored" if postgres["enabled"] else "not monitored"),
-        ("Auto-start", "enabled at login" if autostart else "off"),
+        ("Auto-start", "enabled at login" if started_at_login else "off"),
     ])
     ui.write()
     ui.note("Open the DBSentinel dashboard and choose this computer in the device list.")
-    if autostart:
+    if frozen:
+        ui.note("To change settings or remove the agent later, open dbsentinel-agent.exe again and choose from its menu.")
+    if started_at_login:
         return "autostart"
     ui.write()
     return "run" if yes_no("Run the agent now, in this window?", default=True) else "done"
