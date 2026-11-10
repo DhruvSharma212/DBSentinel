@@ -94,3 +94,5 @@
     width: 100%;
   }
 }
+
+.devicesel{background:#111d2d;color:#cfe0f3;border:1px solid #29384e;padding:7px 10px;border-radius:8px;font-size:11px;max-width:220px}.live.warn{color:#f2bb75;background:#2a2114;border-color:#4d3a1f}.live.warn i{background:#f5ad62;box-shadow:0 0 8px #f5ad6277}@media(max-width:900px){.devicesel{max-width:130px}}
