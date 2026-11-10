@@ -79,3 +79,22 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
   outline: 2px solid #43d9e8; outline-offset: 2px;
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ---------- device access panel ---------- */
+.access-panel h3 { display: flex; align-items: center; gap: 8px; }
+.access-panel h4 { font: 600 12px 'Space Grotesk', sans-serif; margin: 22px 0 8px; color: #cfdced; }
+.inline-form { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 4px; }
+.inline-form input, .inline-form select {
+  flex: 1 1 220px; min-width: 0; background: #0a1321; border: 1px solid #26354a; border-radius: 7px;
+  padding: 9px 12px; color: #dce8f6; font-size: 12px; outline: 0;
+}
+.inline-form select { flex: 0 0 auto; }
+.inline-form input:focus { border-color: #43d9e8; }
+.code-box { margin: 14px 0 6px; padding: 14px 16px; border: 1px solid #285064; background: #0d1d29; border-radius: 9px; }
+.code-box > span { display: block; font-size: 10px; color: #7fb7c4; margin-bottom: 10px; }
+.code-box p { margin: 12px 0 8px; font-size: 11px; }
+.code-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.code-value { font: 600 24px 'DM Mono', monospace; letter-spacing: 3px; color: #7ce6ef; }
+.command { flex: 1 1 280px; min-width: 0; overflow-wrap: anywhere; font: 10px/1.6 'DM Mono', monospace; color: #9fe3ec; background: #08121c; padding: 8px 10px; border-radius: 6px; }
+.smallbtn.danger { border-color: #6a2f3c; color: #ff9db0; background: #24131a; }
+.smallbtn.danger:hover { background: #331a22; }

@@ -1,6 +1,7 @@
 import React from 'react';
 import { ExternalLink } from 'lucide-react';
 import { fmtDateTime } from '../lib/format.js';
+import AccessPanel from '../components/AccessPanel.jsx';
 import { PageIntro } from '../components/ui.jsx';
 
 export default function SettingsPage({ dash, toast }) {
@@ -13,7 +14,8 @@ export default function SettingsPage({ dash, toast }) {
     ['Evidence store (PostgreSQL)', settings?.evidence_store_connected ? 'Connected' : 'Unavailable', !!settings?.evidence_store_connected],
     ['PostgreSQL driver (server)', installed ? 'Installed' : 'Unavailable', !!installed],
     ['Evidence database URL', settings?.database_configured ? 'Configured' : 'Not configured', !!settings?.database_configured],
-    ['Agent ingest key', settings?.ingest_key_configured ? 'Configured' : 'Not configured', !!settings?.ingest_key_configured],
+    ['Shared ingest key', settings?.ingest_key_configured ? (settings?.shared_ingest_key_enabled === false ? 'Configured, switched off' : 'Configured') : 'Not configured', !!settings?.ingest_key_configured && settings?.shared_ingest_key_enabled !== false],
+    ['Admin key (enrollment)', settings?.admin_key_configured ? 'Configured' : 'Not set (enrollment is off)', !!settings?.admin_key_configured],
     ['Dashboard access key', settings?.dashboard_key_required ? 'Required' : 'Not set (dashboard is open)', !!settings?.dashboard_key_required],
     ['Devices registered', String(settings?.devices_registered ?? '—'), (settings?.devices_registered || 0) > 0],
     ['PostgreSQL log integration', settings?.postgres_log_integration || '—', false],
@@ -47,12 +49,13 @@ export default function SettingsPage({ dash, toast }) {
           {host.map(([name, value]) => <div className="setting-row" key={name}><span>{name}</span><b>{value || '—'}</b></div>)}
         </section>
       </div>
+      <AccessPanel toast={toast} />
       <section className="card setup-card">
         <h3>Connect a device</h3>
         <p>
           Run the DBSentinel agent on each Windows laptop you want to monitor. Opening the agent for the first time starts a short guided setup that asks for this
-          server's address, the <code>INGEST_KEY</code> and, optionally, the laptop's local PostgreSQL connection. Use a least-privilege role such as <code>pg_monitor</code>
-          for PostgreSQL. Never commit credentials.
+          server's address, an enrollment code from the panel above (or the shared <code>INGEST_KEY</code>) and, optionally, the laptop's local PostgreSQL connection. Use a
+          least-privilege role such as <code>pg_monitor</code> for PostgreSQL. Never commit credentials.
         </p>
         <button className="secondarybtn" onClick={() => toast('See agent/README.md for the agent setup.')}><ExternalLink size={14} /> Setup instructions</button>
       </section>
