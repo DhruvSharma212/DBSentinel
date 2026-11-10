@@ -91,9 +91,6 @@ export default function AccessPanel({ toast }) {
   }
 
   const server = API_BASE || window.location.origin;
-  const packageCommand = fresh
-    ? `powershell -ExecutionPolicy Bypass -File .\\make-package.ps1 -Server ${server} -Code ${fresh.code} -Name "${fresh.label || 'Friend'}"`
-    : '';
 
   return (
     <section className="card setup-card access-panel">
@@ -120,11 +117,10 @@ export default function AccessPanel({ toast }) {
             <b className="code-value">{fresh.code}</b>
             <button className="smallbtn" onClick={() => copy(fresh.code)}><Copy size={12} /> Copy</button>
           </div>
-          <p>Either type it into the agent&apos;s setup (<code>Enrollment code</code>), or build a package that needs no typing:</p>
-          <div className="code-row">
-            <code className="command">{packageCommand}</code>
-            <button className="smallbtn" onClick={() => copy(packageCommand)}><Copy size={12} /> Copy</button>
-          </div>
+          <p>
+            Send {fresh.label || 'them'} <code>dbsentinel-agent.exe</code> and this code. When they open the program it asks a few questions:
+            press Enter for the suggested server address (<code>{server}</code>), paste the code, and press Enter for the rest.
+          </p>
         </div>
       )}
 
