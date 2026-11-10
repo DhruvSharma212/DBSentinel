@@ -344,3 +344,12 @@ def test_the_menu_only_appears_for_a_person_using_the_packaged_exe(monkeypatch, 
     except Exception:
         pass
     assert shown == []
+
+
+def test_the_working_directory_comes_from_a_windows_path_on_any_os():
+    """CI runs on Linux, where a plain Path does not split a Windows path at its backslashes."""
+    script = autostart.install_script(r"D:\Tools\My Agent\dbsentinel-agent.exe")
+    assert r"-WorkingDirectory 'D:\Tools\My Agent'" in script
+    assert r"-Execute 'D:\Tools\My Agent\dbsentinel-agent.exe'" in script
+    from pathlib import PurePosixPath
+    assert PurePosixPath(r"D:\Tools\My Agent\dbsentinel-agent.exe").parent == PurePosixPath(".")   # the trap this avoids

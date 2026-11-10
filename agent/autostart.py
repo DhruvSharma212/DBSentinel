@@ -8,7 +8,7 @@ import base64
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import psutil
 
@@ -33,7 +33,9 @@ def _powershell(script, timeout=90):
 
 
 def install_script(exe_path, name=None):
-    exe = Path(exe_path)
+    # The task is for Windows, so read the path as a Windows path on every OS: a plain Path would not treat
+    # backslashes as separators on Linux and could not find the exe's folder (this matters for tests and CI).
+    exe = PureWindowsPath(str(exe_path))
     return f"""$ErrorActionPreference = 'Stop'
 $name = '{_quote(name or task_name())}'
 $user = "$env:USERDOMAIN\\$env:USERNAME"
