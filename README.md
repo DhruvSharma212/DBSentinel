@@ -124,9 +124,10 @@ The dashboard polls every 5 seconds with two requests (`/api/devices` and `/api/
 
 On each Windows laptop you want to monitor, follow [agent/README.md](agent/README.md). In short:
 
-1. Get `dbsentinel-agent.exe` (build it with `agent\build.ps1`, which produces a folder in `agent\dist` you can zip and copy).
-2. Open it. With no configuration yet it starts a **guided setup**: server address, ingest key, display name, optional local PostgreSQL. It tests the connection and can enable start-at-login.
-3. Open the dashboard and pick the laptop in the device dropdown.
+1. Get `dbsentinel-agent.exe` (build it with `agent\build.ps1`; `agent\dist` then holds the exe and a zip of it). It is the only file a laptop needs.
+2. Open it. The first time it starts a **guided setup**: server address, enrollment code (or the shared ingest key), display name, optional local PostgreSQL. It tests the connection and can enable start-at-login.
+3. Later, opening the exe again shows a small **menu**: run the agent, turn auto-start on or off, change the settings, or uninstall. No other file is needed to remove it.
+4. Open the dashboard and pick the laptop in the device dropdown.
 
 To try everything on one machine without building the exe, run `python agent.py` from `agent/` after `pip install -r requirements.txt`, with the server address `http://127.0.0.1:8000`.
 
@@ -137,8 +138,7 @@ Instead of giving every laptop the same shared key, give each one a **one-time e
 1. Set `ADMIN_KEY` on the server (see the table above).
 2. In the dashboard open **Settings → Device access**, enter the admin key once (it is kept only until you close the tab), type who the code is for (it becomes the device name) and click **Create code**. A code like `K7P2-9XQM-4TWH` is shown once; it works one time and expires after 24 hours (or 3 / 7 days if you choose).
 3. Get the code onto the laptop, either way:
-   - **No typing for your friend:** run `agent\make-package.ps1` with the command the dashboard shows. It writes `DBSentinel-Agent-<name>.zip` with the server address and the code already inside. Your friend extracts it, double-clicks `dbsentinel-agent.exe`, presses Enter once for "start at login", and is done.
-   - **Typed:** your friend opens the agent and enters the code in the guided setup.
+   - Send your friend **only `dbsentinel-agent.exe`** (the build also makes a zip containing just that file, for chat or e-mail) and the code. They open it, press Enter for the suggested server address, paste the code, and press Enter for the remaining questions. There is nothing else to install or copy.
 4. The laptop appears in the device list. In **Device access** you see each device, whether it uses its own token or the shared key, and a **Revoke** button. Revoking stops that laptop immediately and keeps its stored history; to let it back in, create a new code and run the agent with `--setup`.
 5. When every laptop is enrolled, set `SHARED_INGEST_KEY_ENABLED=false` (or remove `INGEST_KEY`) so the old shared key no longer works.
 
