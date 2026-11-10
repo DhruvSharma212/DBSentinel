@@ -1,0 +1,42 @@
+DBSentinel agent
+================
+
+This small program reports this computer's CPU, memory, disk and running
+processes (and, only if you choose, a local PostgreSQL) to a DBSentinel
+dashboard. It only sends data out. It does not open any port, change any
+setting or touch your files.
+
+How to start (about one minute)
+-------------------------------
+1. If you received this as a zip file: right-click the zip, choose
+   Properties, tick "Unblock" if it is shown, click OK.
+   Then extract it to a folder you will keep, for example
+   C:\DBSentinel-Agent
+
+2. Double-click  dbsentinel-agent.exe
+
+   Windows may say "Windows protected your PC" because the program is not
+   code-signed. Click "More info", then "Run anyway".
+
+3. Follow the window:
+   - If this folder contains agent.config.json, everything is already set up:
+     the program registers this computer by itself and then asks only whether
+     it should start every time you log in to Windows (press Enter for yes).
+   - If it does not, a short setup asks for the server address and an
+     enrollment code. You get the code from whoever runs the dashboard.
+
+4. Open the dashboard. This computer appears in the device list at the top.
+
+Stopping and removing
+---------------------
+- Stop for now: close the window, or press Ctrl+C in it.
+- Remove auto-start: right-click  uninstall-autostart.ps1  ->  Run with
+  PowerShell. Then delete this folder.
+- The administrator can also cut off this computer at any time from the
+  dashboard.
+
+Privacy
+-------
+The data that is sent is listed in README.md (section "What it sends").
+SQL text of PostgreSQL queries is only sent if you turn PostgreSQL monitoring
+on, and you can switch that part off during setup.

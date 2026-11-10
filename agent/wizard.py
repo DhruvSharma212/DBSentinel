@@ -1,8 +1,9 @@
 """Guided first-run setup for the DBSentinel agent.
 
 Started with `--setup`, or automatically when the agent is opened (for example by double-clicking the exe)
-and no agent.config.json exists yet. It asks for the server address and key, optionally a local PostgreSQL,
-writes the config file, checks the connection and can register the auto-start task.
+and no agent.config.json exists yet. It asks for the server address and an enrollment code (or the shared
+ingest key), optionally a local PostgreSQL, writes the config file, checks the connection and can register
+the auto-start task.
 """
 import json
 import os
@@ -16,6 +17,7 @@ import tui
 DEFAULT_API_URL = "https://dbsentinel.onrender.com"
 INTRO = ("This agent reports the CPU, memory, disk and process activity of this computer, and optionally its "
          "PostgreSQL activity, to a DBSentinel server so it can be viewed on the dashboard.")
+CODE_LENGTH = 12
 
 ui = tui.Console()  # replaced for each run by run_setup()
 
@@ -65,8 +67,16 @@ def url_problem(url):
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         return "The address must look like https://your-server.example.com"
     if parsed.scheme == "http" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
-        return "Use https:// (plain http would send the key unencrypted)."
+        return "Use https:// (plain http would send credentials unencrypted)."
     return None
+
+
+def code_problem(text):
+    """Empty is allowed (it means: use an ingest key). Otherwise the code must have 12 letters/digits."""
+    letters = [ch for ch in text if ch.isalnum()]
+    if not text or len(letters) == CODE_LENGTH:
+        return None
+    return "An enrollment code looks like K7P2-9XQM-4TWH (12 letters and digits)."
 
 
 def build_dsn(host, port, user, password, database):
@@ -75,7 +85,7 @@ def build_dsn(host, port, user, password, database):
 
 
 def lock_down(path):
-    """Best effort: on Windows, remove other users' access to the file that holds the key and DB password."""
+    """Best effort: on Windows, remove other users' access to the file that holds the credentials."""
     if os.name != "nt" or not os.environ.get("USERNAME"):
         return
     try:
@@ -85,11 +95,37 @@ def lock_down(path):
         pass
 
 
-def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False, console=None, version=""):
+def offer_autostart(script_dir, console=None):
+    """Ask whether to start the agent at every Windows login and, if so, install the scheduled task.
+    Only for the packaged exe on Windows. Returns True when the task was installed."""
+    import sys
+    script = Path(script_dir) / "install-autostart.ps1"
+    if not (getattr(sys, "frozen", False) and _on_windows() and script.exists()):
+        return False
+    return _ask_autostart(script, console)
+
+
+def _ask_autostart(script, console=None):
+    global ui
+    if console is not None:
+        ui = console
+    ui.write()
+    if not yes_no("Start the agent automatically whenever you log in to Windows?", default=True):
+        return False
+    done = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                          capture_output=True, text=True)
+    text = (done.stdout or done.stderr).strip()
+    (ui.ok if done.returncode == 0 else ui.warn)(text.splitlines()[-1] if text else "Auto-start finished")
+    return done.returncode == 0
+
+
+def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False, console=None, version="", enroll=None):
     """Run the wizard. Returns "run" (start the agent in this window), "autostart" (task installed and started),
     "done" (config saved, nothing started) or "cancel" (nothing changed).
 
-    send_test(config_path) -> (ok, message) sends one snapshot; probe_snapshot(dsn) -> the PostgreSQL probe result."""
+    send_test(config_path) -> (ok, message) sends one snapshot; probe_snapshot(dsn) -> the PostgreSQL probe result;
+    enroll(api_url, code) -> (ok, message, token, label) trades an enrollment code for a device token. When
+    `enroll` is None the wizard only offers the shared ingest key."""
     global ui
     ui = console or tui.Console()
     config_path = Path(config_path)
@@ -110,14 +146,26 @@ def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False, 
         except (OSError, ValueError):
             existing = {}
 
-    # ---------------------------------------------------------------- 1. server
+    # ---------------------------------------------------------------- 1. server and access
     ui.section(1, "Server")
     api_url = ask("Server address", default=existing.get("api_url") or DEFAULT_API_URL, validate=url_problem).rstrip("/")
-    api_key = ask("Ingest key", secret=True, hint="input hidden", validate=lambda v: None if v else "The key cannot be empty.")
+    credentials, label = {}, ""
+    if enroll is not None:
+        while not credentials:
+            code = ask("Enrollment code", default="", validate=code_problem, hint="from the administrator; Enter to use an ingest key")
+            if not code:
+                break
+            with ui.spinner("Enrolling this computer") as spin:
+                ok, message, token, label = enroll(api_url, code)
+                spin.finish(ok, f"Enrolled{' as ' + label if label else ''}" if ok else f"Enrollment failed: {message}")
+            if ok:
+                credentials = {"device_token": token}
+    if not credentials:
+        credentials = {"api_key": ask("Ingest key", secret=True, hint="input hidden", validate=lambda v: None if v else "The key cannot be empty.")}
 
     # ---------------------------------------------------------------- 2. this computer
     ui.section(2, "This computer")
-    device_name = ask("Display name", default=existing.get("device_name") or socket.gethostname())
+    device_name = ask("Display name", default=existing.get("device_name") or label or socket.gethostname())
 
     # ---------------------------------------------------------------- 3. postgresql
     ui.section(3, "PostgreSQL")
@@ -142,7 +190,7 @@ def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False, 
     else:
         ui.note("Only operating-system data will be reported.")
 
-    config = {"api_url": api_url, "api_key": api_key, "device_name": device_name, "interval_seconds": 5, "postgres": postgres}
+    config = {"api_url": api_url, **credentials, "device_name": device_name, "interval_seconds": 5, "postgres": postgres}
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     lock_down(config_path)
 
@@ -155,7 +203,7 @@ def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False, 
     ui.note("Settings saved to " + ui.tail(str(config_path), ui.width - 20))
     if not ok:
         ui.write()
-        ui.note("Check the key and address, then open the agent again or run it with --setup.")
+        ui.note("Check the code or key and the address, then open the agent again or run it with --setup.")
         return "done"
 
     # ---------------------------------------------------------------- 5. startup
@@ -163,15 +211,13 @@ def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False, 
     script = Path(script_dir) / "install-autostart.ps1"
     if frozen and _on_windows() and script.exists():
         ui.section(5, "Startup")
-        if yes_no("Start the agent automatically whenever you log in to Windows?", default=True):
-            done = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                                  capture_output=True, text=True)
-            autostart = done.returncode == 0
-            (ui.ok if autostart else ui.warn)((done.stdout or done.stderr).strip().splitlines()[-1] if (done.stdout or done.stderr).strip() else "Auto-start finished")
+        ui.write()
+        autostart = _ask_autostart(script, ui)
 
     ui.panel("Summary", [
         ("Server", api_url),
         ("Device", device_name),
+        ("Access", "own device token" if "device_token" in credentials else "shared ingest key"),
         ("PostgreSQL", "monitored" if postgres["enabled"] else "not monitored"),
         ("Auto-start", "enabled at login" if autostart else "off"),
     ])

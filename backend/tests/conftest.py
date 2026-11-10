@@ -26,6 +26,8 @@ import main  # noqa: E402
 
 INGEST_KEY = "test-ingest-key"
 KEY_HEADER = {"X-API-Key": INGEST_KEY}
+ADMIN_KEY = "test-admin-key"
+ADMIN_HEADER = {"X-Admin-Key": ADMIN_KEY}
 
 
 @pytest.fixture(scope="session")
@@ -82,7 +84,9 @@ def reset_app(database_url):
     main.limiter = main.RateLimiter()
     os.environ["DATABASE_URL"] = database_url
     os.environ["INGEST_KEY"] = INGEST_KEY
+    os.environ["ADMIN_KEY"] = ADMIN_KEY
     os.environ.pop("DASHBOARD_KEY", None)
+    os.environ.pop("SHARED_INGEST_KEY_ENABLED", None)
 
 
 class Clock:

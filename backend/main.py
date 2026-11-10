@@ -5,6 +5,7 @@ The API does not collect telemetry itself. Agents running on monitored machines 
 and serves it to the dashboard.
 """
 import datetime
+import hashlib
 import logging
 import os
 import re
@@ -40,7 +41,7 @@ except Exception:  # surfaced through /api/settings and 503 responses
 log = logging.getLogger("dbsentinel")
 
 BASE = Path(__file__).resolve().parent.parent
-API_VERSION = "3.1.0"
+API_VERSION = "3.2.0"
 
 # --- configuration ---------------------------------------------------------------------
 DEFAULT_ORIGINS = "https://db-sentinel.vercel.app,http://localhost:5173,http://127.0.0.1:5173"
@@ -62,8 +63,8 @@ EVENT_GRACE_SECONDS = 30
 
 app = FastAPI(title="DBSentinel API", version=API_VERSION,
               description="Agent-fed OS + PostgreSQL monitoring, forensic timeline, and safe investigation")
-app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_methods=["GET", "POST", "OPTIONS"],
-                   allow_headers=["Content-Type", "X-API-Key", "X-Dashboard-Key"])
+app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+                   allow_headers=["Content-Type", "X-API-Key", "X-Dashboard-Key", "X-Device-Token", "X-Admin-Key"])
 
 
 def utcnow():
@@ -128,11 +129,48 @@ def check_key(request: Request, supplied, expected, bucket, what):
         raise HTTPException(status_code=401, detail=what)
 
 
-def require_ingest_key(request: Request, x_api_key: Optional[str] = Header(default=None)):
-    expected = os.getenv("INGEST_KEY")
+def shared_key_enabled():
+    return os.getenv("SHARED_INGEST_KEY_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
+def ingest_auth(request: Request, x_api_key: Optional[str] = Header(default=None),
+                x_device_token: Optional[str] = Header(default=None)):
+    """Who is sending this snapshot: a device with its own token, or (if allowed) a holder of the shared key.
+
+    Returns {"device_id": the device the token belongs to or None, "token_hash": ...}."""
+    ip = client_ip(request)
+    if limiter.count(("badingest", ip), BAD_KEY_WINDOW) >= BAD_KEY_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many failed attempts; try again in a minute.")
+    if x_device_token:
+        token_hash = hash_secret(x_device_token)
+        with db_cursor() as cur:
+            cur.execute("SELECT device_id, revoked_at FROM dbs_device_tokens WHERE token_hash=%s", (token_hash,))
+            row = cur.fetchone()
+        if row and row["revoked_at"] is None:
+            return {"device_id": row["device_id"], "token_hash": token_hash}
+        limiter.add(("badingest", ip), BAD_KEY_WINDOW)
+        raise HTTPException(status_code=401, detail="This device's access was revoked." if row else "Invalid device token.")
+    if x_api_key:
+        expected = os.getenv("INGEST_KEY")
+        if not expected:
+            raise HTTPException(status_code=503, detail="INGEST_KEY is not configured on the server.")
+        if not shared_key_enabled():
+            raise HTTPException(status_code=403, detail="The shared ingest key is disabled on this server; enroll this device with a code.")
+        check_key(request, x_api_key, expected, "badingest", "Invalid or missing X-API-Key.")
+        return {"device_id": None, "token_hash": None}
+    limiter.add(("badingest", ip), BAD_KEY_WINDOW)
+    raise HTTPException(status_code=401, detail="Missing credentials: send X-Device-Token (enrolled device) or X-API-Key.")
+
+
+def require_admin_key(request: Request, x_admin_key: Optional[str] = Header(default=None)):
+    """Administrative actions (enrollment codes, revoking devices) need ADMIN_KEY; without it they are disabled."""
+    expected = os.getenv("ADMIN_KEY")
     if not expected:
-        raise HTTPException(status_code=503, detail="INGEST_KEY is not configured on the server.")
-    check_key(request, x_api_key, expected, "badingest", "Invalid or missing X-API-Key.")
+        raise HTTPException(status_code=503, detail="ADMIN_KEY is not configured on the server.")
+    check_key(request, x_admin_key, expected, "badadmin", "Admin key required.")
+
+
+ADMIN = [Depends(require_admin_key)]
 
 
 def require_dashboard_key(request: Request, x_dashboard_key: Optional[str] = Header(default=None)):
@@ -181,6 +219,15 @@ SCHEMA = [
     """CREATE TABLE IF NOT EXISTS dbs_investigation_notes (
         id BIGSERIAL PRIMARY KEY, event_id BIGINT REFERENCES dbs_events(id) ON DELETE SET NULL,
         created_at TIMESTAMPTZ NOT NULL, author VARCHAR(80) NOT NULL, note TEXT NOT NULL)""",
+    # Enrollment: one-time codes are exchanged for a per-device token. Only SHA-256 hashes are stored.
+    """CREATE TABLE IF NOT EXISTS dbs_enroll_codes (
+        id BIGSERIAL PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+        used_at TIMESTAMPTZ, used_by_device TEXT, revoked_at TIMESTAMPTZ)""",
+    """CREATE TABLE IF NOT EXISTS dbs_device_tokens (
+        id BIGSERIAL PRIMARY KEY, device_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, label TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL, last_used_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ)""",
+    "CREATE INDEX IF NOT EXISTS idx_dbs_tokens_device ON dbs_device_tokens(device_id, id DESC)",
     # Upgrade paths for databases created by earlier versions (every statement is idempotent).
     # v2 -> v3: old rows become device 'legacy-data' (long enough to satisfy DEVICE_ID_RE, so
     # /api/...?device_id=legacy-data can still read them).
@@ -400,6 +447,17 @@ class IngestPayload(BaseModel):
     database: DbInfo = DbInfo()
 
 
+class EnrollIn(BaseModel):
+    code: str
+    device_id: str
+    device_name: str = ""
+
+
+class EnrollCodeIn(BaseModel):
+    label: str = ""
+    ttl_hours: int = 24
+
+
 class NoteIn(BaseModel):
     note: str
     author: str = "Local operator"
@@ -427,6 +485,31 @@ def human_bytes(n):
         if n < 1024 or unit == "TB":
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
+
+
+# --- enrollment secrets ----------------------------------------------------------------
+CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no I, O, 0 or 1: easy to read out and to type
+CODE_LENGTH = 12
+TOKEN_PREFIX = "dst_"
+MAX_CODE_TTL_HOURS = 168
+
+
+def hash_secret(value):
+    """SHA-256 of a high-entropy secret (a slow password hash is not needed for random 60+ bit values)."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def new_code():
+    raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
+    return f"{raw[:4]}-{raw[4:8]}-{raw[8:]}"
+
+
+def normalize_code(text):
+    return re.sub(r"[^A-Za-z0-9]", "", text or "").upper()
+
+
+def new_token():
+    return TOKEN_PREFIX + secrets.token_urlsafe(32)
 
 
 # --- evidence recording and detection rules --------------------------------------------
@@ -612,9 +695,11 @@ def history_rows(cur, scope, limit):
 
 
 # --- ingest ----------------------------------------------------------------------------
-@app.post("/api/ingest", dependencies=[Depends(require_ingest_key)])
-def ingest(payload: IngestPayload):
+@app.post("/api/ingest")
+def ingest(payload: IngestPayload, auth: dict = Depends(ingest_auth)):
     device_id = check_device_id(payload.device_id)
+    if auth["device_id"] and auth["device_id"] != device_id:
+        raise HTTPException(status_code=403, detail="This token belongs to a different device; run the agent setup again.")
     if len(payload.processes) > 300 or len(payload.database.queries) > 100 or len(payload.database.locks) > 100 or len(payload.partitions) > 64:
         raise HTTPException(status_code=422, detail="Payload exceeds list size limits.")
 
@@ -640,6 +725,8 @@ def ingest(payload: IngestPayload):
     with db_cursor() as cur:
         cur.execute("SELECT last_payload, last_seen FROM dbs_devices WHERE device_id=%s", (device_id,))
         previous = cur.fetchone()
+        if auth["token_hash"]:
+            cur.execute("UPDATE dbs_device_tokens SET last_used_at=%s WHERE token_hash=%s", (received, auth["token_hash"]))
         osd["disk_read_bps"], osd["disk_write_bps"] = disk_rates(previous, osd, received) if previous else (None, None)
         alerts = analyze(cur, device_id, osd, procs, db)
         close_ended_events(cur, device_id, received)
@@ -661,6 +748,103 @@ def ingest(payload: IngestPayload):
             (SELECT id FROM dbs_snapshots WHERE device_id=%s ORDER BY id DESC OFFSET %s LIMIT 1)""",
                     (device_id, device_id, SNAPSHOT_RETENTION - 1))
     return {"ok": True, "device_id": device_id, "alerts": len(alerts), "server_time": received.isoformat()}
+
+
+# --- enrollment and administration -----------------------------------------------------
+@app.post("/api/enroll")
+def enroll(body: EnrollIn, request: Request):
+    """Exchange a one-time enrollment code for this device's own token. The code is the credential."""
+    ip = client_ip(request)
+    if limiter.count(("badenroll", ip), BAD_KEY_WINDOW) >= BAD_KEY_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many failed attempts; try again in a minute.")
+    device_id = check_device_id(body.device_id)
+    code = normalize_code(body.code)
+    now = utcnow()
+    with db_cursor() as cur:
+        row = None
+        if len(code) == CODE_LENGTH:
+            # one atomic statement: the code can be used by one request only, and only while valid
+            cur.execute("""UPDATE dbs_enroll_codes SET used_at=%s, used_by_device=%s
+                WHERE code_hash=%s AND used_at IS NULL AND revoked_at IS NULL AND expires_at > %s
+                RETURNING id, label""", (now, device_id, hash_secret(code), now))
+            row = cur.fetchone()
+        if not row:
+            limiter.add(("badenroll", ip), BAD_KEY_WINDOW)
+            raise HTTPException(status_code=401, detail="Invalid, used, revoked or expired enrollment code.")
+        token = new_token()
+        cur.execute("UPDATE dbs_device_tokens SET revoked_at=%s WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
+        cur.execute("INSERT INTO dbs_device_tokens(device_id, token_hash, label, created_at) VALUES(%s,%s,%s,%s)",
+                    (device_id, hash_secret(token), row["label"], now))
+    return {"ok": True, "token": token, "device_id": device_id, "label": row["label"]}
+
+
+@app.post("/api/admin/enroll-codes", dependencies=ADMIN)
+def create_enroll_code(body: EnrollCodeIn):
+    label = body.label.strip()[:80]
+    if not 1 <= body.ttl_hours <= MAX_CODE_TTL_HOURS:
+        raise HTTPException(status_code=400, detail=f"ttl_hours must be between 1 and {MAX_CODE_TTL_HOURS}.")
+    code, now = new_code(), utcnow()
+    expires = now + datetime.timedelta(hours=body.ttl_hours)
+    with db_cursor() as cur:
+        cur.execute("INSERT INTO dbs_enroll_codes(code_hash, label, created_at, expires_at) VALUES(%s,%s,%s,%s) RETURNING id",
+                    (hash_secret(normalize_code(code)), label, now, expires))
+        code_id = cur.fetchone()["id"]
+    return {"id": code_id, "code": code, "label": label, "ttl_hours": body.ttl_hours, "expires_at": expires.isoformat()}
+
+
+@app.get("/api/admin/enroll-codes", dependencies=ADMIN)
+def list_enroll_codes():
+    with db_cursor() as cur:
+        rows = fetch_all(cur, """SELECT id, label, created_at, expires_at, used_at, used_by_device, revoked_at,
+            CASE WHEN revoked_at IS NOT NULL THEN 'revoked' WHEN used_at IS NOT NULL THEN 'used'
+                 WHEN expires_at <= %s THEN 'expired' ELSE 'active' END AS status
+            FROM dbs_enroll_codes ORDER BY id DESC LIMIT 50""", (utcnow(),))
+    return {"codes": rows}
+
+
+@app.delete("/api/admin/enroll-codes/{code_id}", dependencies=ADMIN)
+def revoke_enroll_code(code_id: int):
+    with db_cursor() as cur:
+        cur.execute("UPDATE dbs_enroll_codes SET revoked_at=%s WHERE id=%s AND used_at IS NULL AND revoked_at IS NULL", (utcnow(), code_id))
+        changed = cur.rowcount
+    if not changed:
+        raise HTTPException(status_code=404, detail="No unused code with that id.")
+    return {"ok": True}
+
+
+@app.get("/api/admin/devices", dependencies=ADMIN)
+def admin_devices():
+    """Devices with how they authenticate, plus enrolled devices that have not reported yet."""
+    with db_cursor() as cur:
+        cur.execute("""SELECT d.device_id, d.name, d.host, d.platform, d.agent_version, d.first_seen, d.last_seen,
+                   t.created_at AS token_created_at, t.last_used_at AS token_last_used_at, t.revoked_at AS token_revoked_at,
+                   (t.id IS NOT NULL) AS enrolled
+            FROM dbs_devices d
+            LEFT JOIN LATERAL (SELECT * FROM dbs_device_tokens x WHERE x.device_id = d.device_id ORDER BY x.id DESC LIMIT 1) t ON true
+            ORDER BY d.last_seen DESC""")
+        rows = cur.fetchall()
+        pending = fetch_all(cur, """SELECT t.device_id, t.label, t.created_at FROM dbs_device_tokens t
+            WHERE t.revoked_at IS NULL AND NOT EXISTS (SELECT 1 FROM dbs_devices d WHERE d.device_id = t.device_id)
+            ORDER BY t.id DESC""")
+    devices = []
+    for row in rows:
+        view = device_view(row)
+        view["access"] = "shared key" if not row["enrolled"] else ("revoked" if row["token_revoked_at"] else "device token")
+        view["token_created_at"], view["token_last_used_at"] = row["token_created_at"], row["token_last_used_at"]
+        devices.append(view)
+    return {"devices": devices, "pending": pending}
+
+
+@app.post("/api/admin/devices/{device_id}/revoke", dependencies=ADMIN)
+def revoke_device(device_id: str):
+    """Cut off a device that uses its own token. Its stored data is kept."""
+    check_device_id(device_id)
+    with db_cursor() as cur:
+        cur.execute("UPDATE dbs_device_tokens SET revoked_at=%s WHERE device_id=%s AND revoked_at IS NULL", (utcnow(), device_id))
+        changed = cur.rowcount
+    if not changed:
+        raise HTTPException(status_code=404, detail="This device has no active token: it uses the shared key, or was already revoked.")
+    return {"ok": True, "revoked": changed}
 
 
 # --- read API for the dashboard --------------------------------------------------------
@@ -793,6 +977,7 @@ def settings():
         message = str(exc) if isinstance(exc, StoreUnavailable) else "PostgreSQL evidence store unavailable; check DATABASE_URL, the PostgreSQL service and permissions."
     return {"backend": "online", "version": API_VERSION, "database_configured": bool(os.getenv("DATABASE_URL")),
             "ingest_key_configured": bool(os.getenv("INGEST_KEY")), "dashboard_key_required": bool(os.getenv("DASHBOARD_KEY")),
+            "admin_key_configured": bool(os.getenv("ADMIN_KEY")), "shared_ingest_key_enabled": shared_key_enabled(),
             "psycopg2_available": bool(psycopg2),
             "postgres_log_integration": "Native log ingestion not configured",
             "history_retention": f"PostgreSQL (last {SNAPSHOT_RETENTION} snapshots per device)",

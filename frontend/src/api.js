@@ -42,6 +42,24 @@ export async function request(path, options = {}) {
   return response.json();
 }
 
+// Administration (enrollment codes, revoking devices) needs the server's ADMIN_KEY, kept for this tab only.
+const ADMIN_STORAGE = 'dbsentinel.adminKey';
+
+export function getAdminKey() {
+  try { return sessionStorage.getItem(ADMIN_STORAGE) || ''; } catch (e) { return ''; }
+}
+
+export function setAdminKey(key) {
+  try {
+    if (key) sessionStorage.setItem(ADMIN_STORAGE, key);
+    else sessionStorage.removeItem(ADMIN_STORAGE);
+  } catch (e) { /* storage unavailable: the key just will not be remembered */ }
+}
+
+export function adminRequest(path, options = {}) {
+  return request(path, { ...options, headers: { ...(options.headers || {}), 'X-Admin-Key': getAdminKey() } });
+}
+
 export function saveNote(note) {
   return request('/api/investigation-notes', {
     method: 'POST',

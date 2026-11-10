@@ -58,6 +58,30 @@ def truecolor_supported():
     return False
 
 
+def stdin_is_console():
+    """True when keyboard input comes from a real console or terminal, so asking a question makes sense.
+
+    On Windows the NUL device (what a program gets when its input is closed) answers isatty() with True, so a
+    program started without input would wait for an answer that never comes. The console API tells the truth."""
+    stream = sys.stdin
+    if stream is None:
+        return False
+    try:
+        if not stream.isatty():
+            return False
+    except Exception:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            handle = ctypes.windll.kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+            mode = ctypes.c_uint()
+            return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+        except Exception:
+            return True
+    return True
+
+
 def _set_utf8(stream):
     try:
         stream.reconfigure(encoding="utf-8", errors="replace")
@@ -193,7 +217,7 @@ class Console:
 
     def read_secret(self, prompt):
         """Read a secret and echo one mask character per key, so the user can see that typing registers."""
-        typed = sys.stdin is not None and getattr(sys.stdin, "isatty", lambda: False)()
+        typed = stdin_is_console()
         if not typed:                          # input is piped from a file or another program: nothing to hide
             self.out.write(prompt)
             self.out.flush()

@@ -6,6 +6,9 @@
     python agent.py --config FILE   use a specific config file
     python agent.py --background    no console window, log to agent.log only (used by the auto-start task)
     python agent.py --setup         guided setup: asks a few questions and writes agent.config.json
+
+Credentials (config file or DBSENTINEL_* variables): enroll_code (one-time code from the dashboard, traded for a
+device_token on first start), device_token, or the shared api_key.
 """
 import argparse
 import json
@@ -25,9 +28,9 @@ import psutil
 
 from collector import DatabaseProbe, OSCollector
 import tui
-from wizard import run_setup
+from wizard import lock_down, offer_autostart, run_setup
 
-AGENT_VERSION = "0.2.0"
+AGENT_VERSION = "0.3.0"
 log = logging.getLogger("dbsentinel-agent")
 
 
@@ -52,6 +55,9 @@ def load_config(path):
     env = os.environ
     cfg["api_url"] = (env.get("DBSENTINEL_API_URL") or cfg.get("api_url") or "").rstrip("/")
     cfg["api_key"] = env.get("DBSENTINEL_API_KEY") or cfg.get("api_key") or ""
+    cfg["device_token"] = env.get("DBSENTINEL_DEVICE_TOKEN") or cfg.get("device_token") or ""
+    cfg["enroll_code"] = env.get("DBSENTINEL_ENROLL_CODE") or cfg.get("enroll_code") or ""
+    cfg["name_configured"] = bool(cfg.get("device_name"))
     cfg["device_name"] = cfg.get("device_name") or socket.gethostname()
     cfg["interval_seconds"] = max(2.0, float(cfg.get("interval_seconds", 5)))
     cfg["request_timeout_seconds"] = float(cfg.get("request_timeout_seconds", 30))
@@ -74,10 +80,11 @@ def validate_config(cfg, path):
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             problems.append("api_url must look like https://host")
         elif parsed.scheme == "http" and not local and not cfg["allow_insecure_http"]:
-            problems.append("api_url uses plain http to a remote host, which would send the API key unencrypted; "
+            problems.append("api_url uses plain http to a remote host, which would send credentials unencrypted; "
                             "use https (or set allow_insecure_http=true if you really mean it)")
-    if not cfg["api_key"]:
-        problems.append("api_key is missing (config file or DBSENTINEL_API_KEY)")
+    if not (cfg["api_key"] or cfg["device_token"] or cfg["enroll_code"]):
+        problems.append("no credential is configured: set enroll_code (a one-time code from the dashboard), device_token or api_key "
+                        "(config file or DBSENTINEL_ENROLL_CODE / DBSENTINEL_DEVICE_TOKEN / DBSENTINEL_API_KEY)")
     if problems:
         raise ConfigError("Configuration problem(s):\n  - " + "\n  - ".join(problems))
 
@@ -104,22 +111,105 @@ def build_payload(cfg, device_id, collector, probe):
             "database": probe.snapshot()}
 
 
+def error_detail(exc):
+    """The `detail` message of an HTTP error response from the API (or its raw text)."""
+    raw = exc.read(400).decode("utf-8", "replace").strip()
+    try:
+        detail = json.loads(raw).get("detail")
+        if isinstance(detail, str) and detail:
+            return detail
+    except (ValueError, AttributeError):
+        pass
+    return raw
+
+
+def auth_headers(cfg):
+    """A device with its own token authenticates with it; otherwise the shared ingest key is used."""
+    if cfg.get("device_token"):
+        return {"X-Device-Token": cfg["device_token"]}
+    return {"X-API-Key": cfg.get("api_key", "")}
+
+
+def hint_for(cfg, status, detail):
+    text = detail.lower()
+    if status == 401 and "revoked" in text:
+        return " - this device's access was revoked; ask the administrator for a new enrollment code, then run the agent with --setup"
+    if status == 401 and cfg.get("device_token"):
+        return " - the device token was not accepted; run the agent with --setup to enroll again"
+    if status == 401:
+        return " - the API key was rejected; check api_key against INGEST_KEY on the server"
+    if status == 403 and "different device" in text:
+        return " - the token belongs to another device (agent.state.json was deleted or copied); run the agent with --setup"
+    if status == 403 and "disabled" in text:
+        return " - the server no longer accepts the shared key; enroll with a code (run the agent with --setup)"
+    return ""
+
+
 def send(cfg, payload):
     """POST one snapshot. Returns (ok, message)."""
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         cfg["api_url"] + "/api/ingest", data=body, method="POST",
-        headers={"Content-Type": "application/json", "X-API-Key": cfg["api_key"],
-                 "User-Agent": f"dbsentinel-agent/{AGENT_VERSION}"})
+        headers={"Content-Type": "application/json", "User-Agent": f"dbsentinel-agent/{AGENT_VERSION}", **auth_headers(cfg)})
     try:
         with urllib.request.urlopen(req, timeout=cfg["request_timeout_seconds"]) as resp:
             return True, f"HTTP {resp.status}"
     except urllib.error.HTTPError as exc:
-        detail = exc.read(300).decode("utf-8", "replace").strip()
-        hint = " - the API key was rejected; check api_key against INGEST_KEY on the server" if exc.code == 401 else ""
-        return False, f"HTTP {exc.code}{hint}: {detail}"
+        detail = error_detail(exc)
+        return False, f"HTTP {exc.code}{hint_for(cfg, exc.code, detail)}: {detail}"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         return False, f"cannot reach {cfg['api_url']}: {getattr(exc, 'reason', exc)}"
+
+
+def enroll(api_url, code, device_id, device_name="", timeout=30):
+    """Exchange a one-time enrollment code for this device's own token. Returns (ok, message, token, label)."""
+    body = json.dumps({"code": code, "device_id": device_id, "device_name": device_name}).encode("utf-8")
+    req = urllib.request.Request(api_url + "/api/enroll", data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "User-Agent": f"dbsentinel-agent/{AGENT_VERSION}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+        return True, "enrolled", data["token"], data.get("label", "")
+    except urllib.error.HTTPError as exc:
+        return False, error_detail(exc), "", ""
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return False, f"cannot reach {api_url}: {getattr(exc, 'reason', exc)}", "", ""
+    except (ValueError, KeyError):
+        return False, "the server sent an unexpected answer", "", ""
+
+
+def update_config_file(path, set_values=None, remove=()):
+    """Change a few keys of the config file in place (creating it if needed) and keep it private."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+    except (OSError, ValueError):
+        data = {}
+    data.update(set_values or {})
+    for key in remove:
+        data.pop(key, None)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    lock_down(path)
+
+
+def ensure_enrolled(cfg, config_path, device_id):
+    """If the config holds an enrollment code, trade it for a device token and store the token instead.
+
+    Returns (ok, message). The code is single-use, so it is removed from the file as soon as it worked."""
+    if cfg["device_token"] or not cfg["enroll_code"]:
+        return True, ""
+    ok, message, token, label = enroll(cfg["api_url"], cfg["enroll_code"], device_id, cfg["device_name"], cfg["request_timeout_seconds"])
+    if not ok:
+        return False, message
+    cfg["device_token"], cfg["enroll_code"] = token, ""
+    changes = {"device_token": token, "api_url": cfg["api_url"]}
+    if label and not cfg["name_configured"]:
+        cfg["device_name"] = label
+        changes["device_name"] = label
+    try:
+        update_config_file(config_path, changes, remove=("enroll_code",))
+    except OSError as exc:
+        log.warning("Enrolled, but could not save the token to %s (%s). It works for this run only.", config_path, exc)
+    return True, f"enrolled as {cfg['device_name']}"
 
 
 def launcher_process():
@@ -254,7 +344,7 @@ def launched_from_explorer():
 
 
 def pause_before_exit():
-    if launched_from_explorer() and sys.stdin is not None and sys.stdin.isatty():
+    if launched_from_explorer() and tui.stdin_is_console():
         try:
             input("\nPress Enter to close this window...")
         except EOFError:
@@ -279,11 +369,34 @@ def run_wizard(args):
         finally:
             probe.close()
 
-    return run_setup(args.config, send_test, probe_snapshot, app_dir(), frozen=getattr(sys, "frozen", False), version=AGENT_VERSION)
+    def enroll_with_code(api_url, code):
+        return enroll(api_url, code, load_device_id(app_dir() / "agent.state.json"))
+
+    return run_setup(args.config, send_test, probe_snapshot, app_dir(), frozen=getattr(sys, "frozen", False),
+                     version=AGENT_VERSION, enroll=enroll_with_code)
+
+
+def enroll_on_start(cfg, args, device_id, announce):
+    """First start with a pre-filled package: trade the enrollment code for a token. Returns True when ready to send."""
+    if cfg["device_token"] or not cfg["enroll_code"]:
+        return True
+    screen = tui.Console() if announce else None
+    if screen:
+        screen.header("Agent", f"v{AGENT_VERSION}")
+        screen.write()
+        with screen.spinner("Enrolling this computer") as spin:
+            ok, message = ensure_enrolled(cfg, args.config, device_id)
+            spin.finish(ok, f"Enrolled as {cfg['device_name']}" if ok else f"Enrollment failed: {message}")
+        if not ok:
+            screen.note("Ask the administrator for a new enrollment code and run the agent with --setup.")
+        return ok
+    ok, message = ensure_enrolled(cfg, args.config, device_id)
+    (log.info if ok else log.error)("Enrollment: %s", message)
+    return ok
 
 
 def execute(args):
-    interactive = sys.stdin is not None and sys.stdin.isatty()
+    interactive = tui.stdin_is_console()
     first_run = not args.config.exists() and interactive and not (args.once or args.dry_run or args.background)
     if args.setup or first_run:
         try:
@@ -295,7 +408,9 @@ def execute(args):
             pause_before_exit()
             return 0
     cfg = load_config(args.config)
-    device_id = load_device_id(app_dir() / "agent.state.json")
+    state_path = app_dir() / "agent.state.json"
+    first_launch = not state_path.exists()
+    device_id = load_device_id(state_path)
 
     if args.dry_run:
         collector = OSCollector()
@@ -305,6 +420,16 @@ def execute(args):
         probe.close()
         return 0
     validate_config(cfg, args.config)
+    announce = interactive and not (args.once or args.background)
+    if not enroll_on_start(cfg, args, device_id, announce):
+        if announce:
+            pause_before_exit()
+        return 4
+    if announce and first_launch and getattr(sys, "frozen", False):
+        try:
+            offer_autostart(app_dir(), tui.Console())    # a pre-filled package skips the wizard, so ask here
+        except (EOFError, KeyboardInterrupt):
+            pass                                           # nobody is there to answer: carry on without auto-start
     if args.once:
         collector = OSCollector()
         time.sleep(1.0)
