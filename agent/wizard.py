@@ -20,6 +20,11 @@ INTRO = ("This agent reports the CPU, memory, disk and process activity of this 
 ui = tui.Console()  # replaced for each run by run_setup()
 
 
+def _on_windows():
+    """Looked up at call time so tests can pretend to be on Windows without touching os.name."""
+    return os.name == "nt"
+
+
 # These two are looked up at call time so tests can replace them.
 def _line(prompt):
     return input(prompt)
@@ -156,7 +161,7 @@ def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False, 
     # ---------------------------------------------------------------- 5. startup
     autostart = False
     script = Path(script_dir) / "install-autostart.ps1"
-    if frozen and os.name == "nt" and script.exists():
+    if frozen and _on_windows() and script.exists():
         ui.section(5, "Startup")
         if yes_no("Start the agent automatically whenever you log in to Windows?", default=True):
             done = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],

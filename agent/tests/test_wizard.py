@@ -115,7 +115,7 @@ def test_autostart_is_offered_only_for_the_packaged_exe(tmp_path, monkeypatch):
         returncode, stdout, stderr = 0, "Installed scheduled task", ""
 
     monkeypatch.setattr(wizard.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or Done())
-    monkeypatch.setattr(wizard.os, "name", "nt")
+    monkeypatch.setattr(wizard, "_on_windows", lambda: True)
     Script(monkeypatch, lines=["", "", "n", "y"], secrets=["k"])            # ... auto-start? yes
     result, _ = run(tmp_path, frozen=True)
     assert result == "autostart" and calls and calls[0][-1].endswith("install-autostart.ps1")
