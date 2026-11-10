@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 import psutil
 
 from collector import DatabaseProbe, OSCollector
+import tui
 from wizard import run_setup
 
 AGENT_VERSION = "0.2.0"
@@ -132,12 +133,21 @@ def launcher_process():
         return None
 
 
-def run(cfg, device_id):
+def run(cfg, device_id, show_banner=False):
     launcher = launcher_process()
     collector = OSCollector()
     probe = DatabaseProbe(cfg["postgres"]["enabled"], cfg["postgres"]["dsn"], cfg["postgres"]["send_query_text"])
     time.sleep(1.0)  # let the primed CPU counters accumulate a real first interval
     interval, fails, sent = cfg["interval_seconds"], 0, 0
+    if show_banner:
+        screen = tui.Console()
+        screen.header("Agent", f"v{AGENT_VERSION}")
+        screen.write()
+        screen.kv([("Device", f"{cfg['device_name']}  ({device_id})"), ("Server", cfg["api_url"]),
+                   ("Interval", f"every {interval:g} s"), ("PostgreSQL", "monitored" if probe.enabled else "not monitored")])
+        screen.write()
+        screen.note("Press Ctrl+C to stop.")
+        screen.write()
     log.info("Agent %s started: device %s (%s) -> %s every %gs; PostgreSQL monitoring %s",
              AGENT_VERSION, device_id, cfg["device_name"], cfg["api_url"], interval,
              "on" if probe.enabled else "off")
@@ -174,14 +184,16 @@ def setup_logging(verbose, console=True):
     level = logging.DEBUG if verbose else logging.INFO
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     handlers = []
+    stream = None
     if console and sys.stderr is not None:
-        handlers.append(logging.StreamHandler())
+        stream = logging.StreamHandler(sys.stdout if sys.stdout is not None else sys.stderr)
+        handlers.append(stream)
     try:
         handlers.append(logging.handlers.RotatingFileHandler(app_dir() / "agent.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8"))
     except OSError:
         pass
     for h in handlers:
-        h.setFormatter(fmt)
+        h.setFormatter(tui.ConsoleFormatter(tui.Console(stream=h.stream)) if h is stream else fmt)
         log.addHandler(h)
     log.setLevel(level)
 
@@ -267,7 +279,7 @@ def run_wizard(args):
         finally:
             probe.close()
 
-    return run_setup(args.config, send_test, probe_snapshot, app_dir(), frozen=getattr(sys, "frozen", False))
+    return run_setup(args.config, send_test, probe_snapshot, app_dir(), frozen=getattr(sys, "frozen", False), version=AGENT_VERSION)
 
 
 def execute(args):
@@ -304,7 +316,7 @@ def execute(args):
     if not acquire_single_instance(app_dir() / "agent.lock"):
         log.error("Another DBSentinel agent is already running from %s; exiting.", app_dir())
         return 3
-    run(cfg, device_id)
+    run(cfg, device_id, show_banner=not args.background)
     return 0
 
 

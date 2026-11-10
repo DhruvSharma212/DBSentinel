@@ -1,10 +1,9 @@
-"""Interactive first-run setup for the DBSentinel agent.
+"""Guided first-run setup for the DBSentinel agent.
 
 Started with `--setup`, or automatically when the agent is opened (for example by double-clicking the exe)
-and no agent.config.json exists yet. It asks a few questions, writes the config file, tests the connection to
-the server and can register the auto-start task.
+and no agent.config.json exists yet. It asks for the server address and key, optionally a local PostgreSQL,
+writes the config file, checks the connection and can register the auto-start task.
 """
-import getpass
 import json
 import os
 import socket
@@ -12,14 +11,13 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
-DEFAULT_API_URL = "https://dbsentinel.onrender.com"
+import tui
 
-BANNER = """
-DBSentinel agent setup
-----------------------
-This agent sends this computer's CPU, memory, disk and process data (and, if you choose, PostgreSQL
-activity) to a DBSentinel server so you can see it on the dashboard. Press Enter to accept a [default].
-"""
+DEFAULT_API_URL = "https://dbsentinel.onrender.com"
+INTRO = ("This agent reports the CPU, memory, disk and process activity of this computer, and optionally its "
+         "PostgreSQL activity, to a DBSentinel server so it can be viewed on the dashboard.")
+
+ui = tui.Console()  # replaced for each run by run_setup()
 
 
 # These two are looked up at call time so tests can replace them.
@@ -28,33 +26,32 @@ def _line(prompt):
 
 
 def _secret(prompt):
-    return getpass.getpass(prompt)
+    return ui.read_secret(prompt)
 
 
-def ask(prompt, default=None, secret=False, validate=None):
+def ask(label, default=None, secret=False, validate=None, hint=None):
     while True:
-        shown = f"{prompt} [{default}]: " if default else f"{prompt}: "
-        value = (_secret if secret else _line)(shown).strip()
+        prompt = ui.prompt_text(label, default=None if secret else default, hint=hint)
+        value = (_secret if secret else _line)(prompt).strip()
         if not value and default is not None:
             value = default
         problem = validate(value) if validate else None
         if problem:
-            print("  ! " + problem)
+            ui.problem(problem)
             continue
         return value
 
 
-def yes_no(prompt, default=True):
-    suffix = "Y/n" if default else "y/N"
+def yes_no(label, default=True):
     while True:
-        answer = _line(f"{prompt} [{suffix}]: ").strip().lower()
+        answer = _line(ui.yes_no_text(label, default)).strip().lower()
         if not answer:
             return default
         if answer in ("y", "yes"):
             return True
         if answer in ("n", "no"):
             return False
-        print("  ! Please answer y or n.")
+        ui.problem("Please answer y or n.")
 
 
 def url_problem(url):
@@ -83,61 +80,99 @@ def lock_down(path):
         pass
 
 
-def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False):
+def run_setup(config_path, send_test, probe_snapshot, script_dir, frozen=False, console=None, version=""):
     """Run the wizard. Returns "run" (start the agent in this window), "autostart" (task installed and started),
     "done" (config saved, nothing started) or "cancel" (nothing changed).
 
     send_test(config_path) -> (ok, message) sends one snapshot; probe_snapshot(dsn) -> the PostgreSQL probe result."""
+    global ui
+    ui = console or tui.Console()
     config_path = Path(config_path)
-    print(BANNER)
+
+    ui.header("Agent setup", f"v{version}" if version else "")
+    ui.write()
+    ui.paragraph(INTRO)
+    ui.paragraph("Press Enter to accept a value shown in [brackets].")
+
     existing = {}
     if config_path.exists():
+        ui.write()
         if not yes_no(f"{config_path.name} already exists. Replace it?", default=False):
-            print("Keeping the existing configuration.")
+            ui.note("Keeping the existing configuration.")
             return "cancel"
         try:
             existing = json.loads(config_path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             existing = {}
 
+    # ---------------------------------------------------------------- 1. server
+    ui.section(1, "Server")
     api_url = ask("Server address", default=existing.get("api_url") or DEFAULT_API_URL, validate=url_problem).rstrip("/")
-    api_key = ask("Ingest key from whoever runs the server (typing is hidden)", secret=True,
-                  validate=lambda v: None if v else "The key cannot be empty.")
-    device_name = ask("Name to show in the dashboard", default=existing.get("device_name") or socket.gethostname())
+    api_key = ask("Ingest key", secret=True, hint="input hidden", validate=lambda v: None if v else "The key cannot be empty.")
 
+    # ---------------------------------------------------------------- 2. this computer
+    ui.section(2, "This computer")
+    device_name = ask("Display name", default=existing.get("device_name") or socket.gethostname())
+
+    # ---------------------------------------------------------------- 3. postgresql
+    ui.section(3, "PostgreSQL")
     postgres = {"enabled": False, "dsn": "", "send_query_text": True}
-    if yes_no("Is there a PostgreSQL server on THIS computer that you want to monitor?", default=False):
-        host = ask("  PostgreSQL host", default="localhost")
-        port = ask("  Port", default="5432", validate=lambda v: None if v.isdigit() else "The port must be a number.")
-        user = ask("  User", default="postgres")
-        password = ask("  Password (typing is hidden)", secret=True)
-        database = ask("  Database", default="postgres")
+    if yes_no("Monitor a PostgreSQL server running on this computer?", default=False):
+        ui.write()
+        host = ask("Host", default="localhost")
+        port = ask("Port", default="5432", validate=lambda v: None if v.isdigit() else "The port must be a number.")
+        user = ask("User", default="postgres")
+        password = ask("Password", secret=True, hint="input hidden")
+        database = ask("Database", default="postgres")
         dsn = build_dsn(host, port, user, password, database)
-        result = probe_snapshot(dsn)
-        print("  -> " + ("Connected: " if result["connected"] else "Could not connect: ") + result["message"])
-        if result["connected"] or yes_no("  Save these PostgreSQL settings anyway?", default=False):
+        ui.write()
+        with ui.spinner(f"Connecting to PostgreSQL at {host}:{port}") as spin:
+            result = probe_snapshot(dsn)
+            spin.finish(result["connected"], result["message"] if result["connected"] else f"Could not connect: {result['message']}")
+        if result["connected"] or yes_no("Save these PostgreSQL settings anyway?", default=False):
             postgres.update(enabled=True, dsn=dsn)
-            postgres["send_query_text"] = yes_no("  Send the SQL text of queries to the dashboard? (it can contain sensitive values)", default=True)
+            ui.write()
+            postgres["send_query_text"] = yes_no("Send the SQL text of queries to the dashboard?", default=True)
+            ui.note("Query text can contain sensitive values.")
+    else:
+        ui.note("Only operating-system data will be reported.")
 
     config = {"api_url": api_url, "api_key": api_key, "device_name": device_name, "interval_seconds": 5, "postgres": postgres}
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     lock_down(config_path)
-    print(f"\nSaved {config_path}")
 
-    print("Testing the connection to the server (the first request can take a minute if the server was asleep)...")
-    ok, message = send_test(config_path)
+    # ---------------------------------------------------------------- 4. connection check
+    ui.section(4, "Connection check")
+    ui.note("The first request can take up to a minute if the server was idle.")
+    with ui.spinner(f"Contacting {api_url}") as spin:
+        ok, message = send_test(config_path)
+        spin.finish(ok, f"The server accepted a snapshot ({message})" if ok else f"The server did not accept the snapshot: {message}")
+    ui.note("Settings saved to " + ui.tail(str(config_path), ui.width - 20))
     if not ok:
-        print(f"  ! The server did not accept the test snapshot: {message}")
-        print("  The settings are saved. Fix the problem (wrong key? wrong address?) and run the agent again,")
-        print("  or run it with --setup to enter the values again.")
+        ui.write()
+        ui.note("Check the key and address, then open the agent again or run it with --setup.")
         return "done"
-    print(f"  OK: {message}. Your computer should appear on the dashboard now.")
 
+    # ---------------------------------------------------------------- 5. startup
+    autostart = False
     script = Path(script_dir) / "install-autostart.ps1"
-    if frozen and os.name == "nt" and script.exists() and yes_no("\nStart the agent automatically whenever you log in to Windows?", default=True):
-        done = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                              capture_output=True, text=True)
-        print((done.stdout or done.stderr).strip())
-        if done.returncode == 0:
-            return "autostart"
-    return "run" if yes_no("\nRun the agent now, in this window? (Press Ctrl+C or close the window to stop it)", default=True) else "done"
+    if frozen and os.name == "nt" and script.exists():
+        ui.section(5, "Startup")
+        if yes_no("Start the agent automatically whenever you log in to Windows?", default=True):
+            done = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                                  capture_output=True, text=True)
+            autostart = done.returncode == 0
+            (ui.ok if autostart else ui.warn)((done.stdout or done.stderr).strip().splitlines()[-1] if (done.stdout or done.stderr).strip() else "Auto-start finished")
+
+    ui.panel("Summary", [
+        ("Server", api_url),
+        ("Device", device_name),
+        ("PostgreSQL", "monitored" if postgres["enabled"] else "not monitored"),
+        ("Auto-start", "enabled at login" if autostart else "off"),
+    ])
+    ui.write()
+    ui.note("Open the DBSentinel dashboard and choose this computer in the device list.")
+    if autostart:
+        return "autostart"
+    ui.write()
+    return "run" if yes_no("Run the agent now, in this window?", default=True) else "done"
