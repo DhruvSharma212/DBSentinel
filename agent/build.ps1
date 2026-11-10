@@ -1,12 +1,15 @@
 <#
-  Builds a single-file Windows executable of the DBSentinel agent.
+  Builds the Windows agent: one file, nothing else to ship.
 
       cd agent
       powershell -ExecutionPolicy Bypass -File .\build.ps1
 
-  Output: agent\dist\dbsentinel-agent.exe, plus the config example, the auto-start scripts and the README,
-  so the dist folder can be zipped and copied to the laptop you want to monitor
-  (or use make-package.ps1 to build a per-person zip that needs no typing).
+  Output (in agent\dist):
+      dbsentinel-agent.exe        the whole product. First start: a guided setup asks for an enrollment code.
+                                  Later starts: a menu (run, auto-start on/off, change settings, uninstall).
+      DBSentinel-Agent.zip        the same exe in a zip, for sending through chat or e-mail.
+
+  An enrollment code comes from the dashboard (Settings > Device access).
 #>
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -29,9 +32,12 @@ Write-Host 'Building dbsentinel-agent.exe...'
     --specpath build --workpath build\work --distpath dist agent.py
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
 
-foreach ($f in 'agent.config.example.json', 'install-autostart.ps1', 'uninstall-autostart.ps1', 'make-package.ps1', 'README.md') {
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $f) -Destination 'dist' -Force
-}
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'package\START-HERE.txt') -Destination 'dist' -Force
+# The zip holds only the exe, taken by name so nothing else can slip in (a dist folder you have run the agent
+# from may also hold a real agent.config.json).
+$zip = Join-Path $PSScriptRoot 'dist\DBSentinel-Agent.zip'
+if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+Compress-Archive -Path (Join-Path $PSScriptRoot 'dist\dbsentinel-agent.exe') -DestinationPath $zip
+
 Write-Host ''
 Write-Host "Done: $(Join-Path $PSScriptRoot 'dist\dbsentinel-agent.exe')"
+Write-Host "Send:  $zip"
