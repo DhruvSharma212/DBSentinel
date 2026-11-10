@@ -80,3 +80,11 @@ def test_a_note_survives_its_incident_closing(api, push, clock):
     clock.advance(main.EVENT_GRACE_SECONDS + 10)
     push(cpu=10)
     assert any(n["note"] == "kept" and n["event_id"] == event_id for n in api.get("/api/dashboard").json()["notes"])
+
+
+def test_incident_remembers_which_rule_raised_it(api, push):
+    push(cpu=95, active=1, locks=[{"blocked_pid": 1, "blocking_pid": 2}])
+    rules = {e["details"]["rule_id"] for e in api.get(f"/api/events?device_id={DEV}").json()["events"]}
+    assert {"OS-CPU", "LOCK-1", "CORR-CPU-DB"} <= rules
+    assert api.get("/api/devices").json()["version"] == main.API_VERSION
+    assert api.get("/api/dashboard").json()["version"] == main.API_VERSION

@@ -101,3 +101,12 @@ def test_disk_throughput_needs_active_sessions_and_sane_counters(api, push, cloc
     clock.advance(500)                                  # a long gap is not a rate either
     push(read_bytes=999 * MB, write_bytes=999 * MB, active=2)
     assert api.get("/api/os").json()["disk_write_bps"] is None
+
+
+def test_history_carries_disk_throughput_for_charts(api, push, clock):
+    push(read_bytes=0, write_bytes=0)
+    clock.advance(10)
+    push(read_bytes=100 * MB, write_bytes=600 * MB)
+    first, second = api.get("/api/dashboard").json()["history"]
+    assert first["read_bps"] is None and first["write_bps"] is None
+    assert second["read_bps"] == 10 * MB and second["write_bps"] == 60 * MB

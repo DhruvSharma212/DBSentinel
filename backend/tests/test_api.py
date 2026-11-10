@@ -57,7 +57,7 @@ def test_ingest_then_read_back(api, push):
 def test_dashboard_endpoint_returns_everything_in_one_request(api, push):
     push(cpu=95)
     d = api.get(f"/api/dashboard?device_id={DEV}").json()
-    assert set(d) == {"device", "os", "processes", "database", "alerts", "history", "events", "notes"}
+    assert set(d) == {"device", "os", "processes", "database", "alerts", "history", "events", "notes", "version"}
     assert d["alerts"][0]["id"] == "OS-CPU" and d["events"][0]["message"] == "High CPU utilization"
     assert d["processes"][0]["name"] == "chrome.exe" and len(d["history"]) == 1
 

@@ -480,8 +480,9 @@ def analyze(cur, device_id, osd, procs, db):
     active = db["counts"].get("active", 0)
 
     def raise_alert(alert, typ, key=""):
+        # the rule id is stored with the incident so the dashboard can explain it later, after the alert is gone
         alert["event_id"] = record_event(cur, device_id, alert["source"], alert["severity"], typ, alert["title"],
-                                         alert["detail"], alert["evidence"], key)
+                                         alert["detail"], {"rule_id": alert["id"], **alert["evidence"]}, key)
         alerts.append(alert)
 
     def lead(alert_id, title, detail, evidence):
@@ -603,7 +604,8 @@ def note_rows(cur, scope, limit):
 
 
 def history_rows(cur, scope, limit):
-    rows = fetch_all(cur, "SELECT timestamp,cpu,memory,disk,db_total AS connections,db_active AS active "
+    rows = fetch_all(cur, "SELECT timestamp,cpu,memory,disk,db_total AS connections,db_active AS active, "
+                          "(payload->'os'->>'disk_read_bps')::float AS read_bps, (payload->'os'->>'disk_write_bps')::float AS write_bps "
                           "FROM dbs_snapshots WHERE device_id=%s ORDER BY id DESC LIMIT %s", (scope, limit))
     rows.reverse()
     return rows
@@ -681,7 +683,8 @@ def health():
 def devices():
     with db_cursor() as cur:
         cur.execute("SELECT * FROM dbs_devices ORDER BY last_seen DESC")
-        return {"devices": [device_view(r) for r in cur.fetchall()], "offline_after_seconds": OFFLINE_AFTER_SECONDS}
+        return {"devices": [device_view(r) for r in cur.fetchall()], "offline_after_seconds": OFFLINE_AFTER_SECONDS,
+                "version": API_VERSION}
 
 
 @app.get("/api/dashboard", dependencies=PROTECTED)
@@ -694,7 +697,8 @@ def dashboard(device_id: Optional[str] = None):
         evs = event_rows(cur, dev["device_id"], 100)
         notes = note_rows(cur, dev["device_id"], 100)
     return {"device": view, "os": live["os"], "processes": live["processes"], "database": live["database"],
-            "alerts": live["alerts"] if view["online"] else [], "history": hist, "events": evs, "notes": notes}
+            "alerts": live["alerts"] if view["online"] else [], "history": hist, "events": evs, "notes": notes,
+            "version": API_VERSION}
 
 
 @app.get("/api/overview", dependencies=PROTECTED)
