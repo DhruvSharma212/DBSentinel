@@ -13,40 +13,46 @@ Windows laptop(s)                          Server                               
 └────────────────────────────┘            └────────────────────────────┘
 ```
 
-The API server no longer measures anything itself, so the dashboard never shows the server's own CPU or memory. It shows the machines that run an agent.
+The API server does not measure anything itself, so the dashboard never shows the server's own CPU or memory. It shows the machines that run an agent.
 
 ## Features
 
-- **OS monitoring (per device):** CPU, RAM, system-drive and volume usage, system-wide disk I/O, and the top 100 processes (busiest by CPU plus largest by memory) with per-process disk read/write counters, collected with `psutil`.
+- **OS monitoring (per device):** CPU, RAM, system-drive and volume usage, disk throughput, and the top 100 processes (busiest by CPU plus largest by memory) with per-process disk read/write counters, collected with `psutil`.
 - **PostgreSQL monitoring (per device, optional):** connection counts, active/idle sessions, query text, and blocking/blocked session pairs from `pg_stat_activity` and `pg_blocking_pids`. Only real client sessions are counted, not background workers.
-- **Rule-based alerts** (evaluated on every snapshot):
+- **Rule-based alerts**, evaluated on every snapshot:
 
-  | Condition | Threshold | Severity |
+  | Rule | Raised when | Severity |
   |---|---|---|
-  | High CPU | ≥ 85 % | high |
-  | Memory pressure | ≥ 90 % | critical |
-  | Low disk space | ≥ 90 % used | high |
-  | PostgreSQL configured but unreachable | — | warning |
-  | A session blocked by another | — | warning |
-  | CPU high **and** PostgreSQL has active sessions | ≥ 85 % + active > 0 | warning (correlation lead) |
+  | `OS-CPU` | CPU ≥ 85 % | high |
+  | `OS-MEM` | memory ≥ 90 % | critical |
+  | `OS-DISK` | system volume ≥ 90 % used | high |
+  | `DB-CONN` | PostgreSQL is configured on the agent but unreachable | warning |
+  | `LOCK-<pid>` | a session is blocked by another | warning |
+  | `CORR-CPU-DB` | CPU ≥ 85 % **and** PostgreSQL has active sessions. Names the longest active query, and says when `postgres` is the busiest process | warning |
+  | `CORR-MEM-DB` | memory ≥ 90 % and the PostgreSQL processes hold ≥ 10 % of RAM | warning |
+  | `CORR-DISK-DB` | disk ≥ 90 % used and PostgreSQL has active sessions | warning |
+  | `CORR-IO-DB` | disk throughput (read + write, measured between snapshots) ≥ 50 MB/s and active sessions | warning |
+  | `CORR-LOCK-HOST` | lock waits while CPU ≥ 70 % or memory ≥ 85 % | warning |
 
-  The correlation rule is an investigative hint, not proof of cause. Lock waits are also saved as correlation-lead events, but only the six rows above appear as live alerts.
-- **PostgreSQL evidence store:** snapshots, events and investigation notes persist in PostgreSQL (see the tables below). The last 1,000 snapshots are kept **per device**, which is about 83 minutes at one snapshot every 5 seconds.
+  Correlation rules (`CORR-*`) are investigative leads, not proof of cause.
+- **Incidents:** every alert becomes an incident stored in PostgreSQL. It opens at the first observation, counts the snapshots that showed it, and closes when the condition has not been seen for 30 seconds. If the condition returns, that is a new incident, so history is never merged into one endless row.
+- **Investigation notes** are saved against the incident they refer to, with an author name.
+- **PostgreSQL evidence store:** snapshots, incidents and notes persist in PostgreSQL (tables below). The last 1,000 snapshots are kept **per device**, about 83 minutes at one snapshot every 5 seconds.
 - **Multi-device dashboard:** a dropdown selects the device, with online/offline status. A device counts as offline after 15 seconds without a report.
-- **Safe response suggestions:** recommendation-only. DBSentinel never kills processes, deletes files or terminates database sessions.
+- **Safe response suggestions:** recommendation-only, generated from the conditions active right now with the evidence behind each. DBSentinel never kills processes, deletes files or terminates database sessions.
 
 ## Components
 
 | Folder | What it is |
 |---|---|
-| `backend/` | FastAPI API: ingest, rules, evidence store, dashboard endpoints |
-| `frontend/` | React + Vite dashboard |
-| `agent/` | Windows agent (Python, packaged as `dbsentinel-agent.exe`). See [agent/README.md](agent/README.md) |
+| `backend/` | FastAPI API: ingest, rules, evidence store, dashboard endpoints, tests |
+| `frontend/` | React + Vite dashboard (`src/api.js`, `hooks/`, `components/`, `pages/`, `lib/`), unit tests |
+| `agent/` | Windows agent (Python, packaged as `dbsentinel-agent.exe`) with a guided setup. See [agent/README.md](agent/README.md) |
 
 ## Requirements
 
 - Python 3.10 or newer
-- Node.js and npm (dashboard)
+- Node.js 20 or newer and npm (dashboard)
 - PostgreSQL for the **evidence store** (server side). The monitored laptop can also have its own PostgreSQL, which is optional.
 
 ## 1. Server: evidence database and API
@@ -60,7 +66,7 @@ CREATE USER dbsentinel_user WITH PASSWORD 'ChangeThisPassword123!';
 CREATE DATABASE dbsentinel OWNER dbsentinel_user;
 ```
 
-On first start the API creates its four tables automatically and upgrades an older DBSentinel database in place. Rows from before devices existed become the device `legacy-data`, readable with `?device_id=legacy-data`. The configured user must be able to create tables.
+On first start the API creates its four tables automatically and upgrades an older DBSentinel database in place (every schema statement is safe to repeat). Rows from before devices existed become the device `legacy-data`, readable with `?device_id=legacy-data`. The configured user must be able to create tables.
 
 ### Start the API (Windows PowerShell)
 
@@ -81,6 +87,7 @@ Settings in `backend/.env` (also usable as environment variables on a hosting se
 |---|---|---|
 | `DATABASE_URL` | yes | Evidence database, e.g. `postgresql://dbsentinel_user:ChangeThisPassword123!@localhost:5432/dbsentinel`. URL-encode `@ # / :` in the password |
 | `INGEST_KEY` | yes, to accept agents | Shared secret agents send in the `X-API-Key` header. Without it `/api/ingest` answers 503. Generate one: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `DASHBOARD_KEY` | no | When set, every dashboard endpoint needs the header `X-Dashboard-Key`, and the dashboard shows a key prompt before any data. Leave it unset for an open dashboard |
 | `ALLOWED_ORIGINS` | no | Comma-separated browser origins allowed to call the API. Default: `https://db-sentinel.vercel.app`, `http://localhost:5173`, `http://127.0.0.1:5173` |
 | `OFFLINE_AFTER_SECONDS` | no | Seconds without a report before a device shows offline (default 15) |
 | `DB_POOL_MAX` | no | Maximum database connections (default 5). Extra requests wait up to 10 s, then get a 503 |
@@ -106,48 +113,51 @@ npm run dev
 
 Open http://localhost:5173. The Vite dev server proxies `/api` to `http://127.0.0.1:8000`. Until an agent reports, the dashboard shows "No device connected yet".
 
-For a hosted dashboard (for example Vercel), set the build-time variable `VITE_API_URL` to the public address of the API (see `frontend/.env.example`). Without it the page calls `/api` on its own domain. `npm run build` creates `frontend/dist`; if that folder exists, the backend also serves it.
+For a hosted dashboard (for example Vercel), set the build-time variable `VITE_API_URL` to the public address of the API (see `frontend/.env.example`). Without it the page calls `/api` on its own domain. `npm run build` creates `frontend/dist`; if that folder exists, the backend also serves it (and never serves files outside it).
+
+The dashboard polls every 5 seconds with two requests (`/api/devices` and `/api/dashboard`), and pauses while the browser tab is hidden.
 
 ## 3. Agent: show a laptop's data
 
 On each Windows laptop you want to monitor, follow [agent/README.md](agent/README.md). In short:
 
 1. Get `dbsentinel-agent.exe` (build it with `agent\build.ps1`, which produces a folder in `agent\dist` you can zip and copy).
-2. Copy `agent.config.example.json` to `agent.config.json` and set `api_url` (the API address) and `api_key` (the server's `INGEST_KEY`). Optionally set `postgres.dsn` to monitor the laptop's local PostgreSQL.
-3. Run `dbsentinel-agent.exe --once` to test, then run it. `install-autostart.ps1` starts it automatically at every login.
-4. Open the dashboard and pick the laptop in the device dropdown.
+2. Open it. With no configuration yet it starts a **guided setup**: server address, ingest key, display name, optional local PostgreSQL. It tests the connection and can enable start-at-login.
+3. Open the dashboard and pick the laptop in the device dropdown.
 
-To try everything on one machine without building the exe, run `python agent.py` from `agent/` after `pip install -r requirements.txt`, with `api_url` set to `http://127.0.0.1:8000`.
+To try everything on one machine without building the exe, run `python agent.py` from `agent/` after `pip install -r requirements.txt`, with the server address `http://127.0.0.1:8000`.
 
 ## Deployed setup (Vercel + Render)
 
-The public instance serves the dashboard from Vercel (https://db-sentinel.vercel.app) and the API from Render. After deploying this version:
+The public instance serves the dashboard from Vercel (https://db-sentinel.vercel.app) and the API from Render. A working configuration:
 
-1. On the API host, set `INGEST_KEY` (and keep `DATABASE_URL`). Add `ALLOWED_ORIGINS` only if the dashboard is served from another origin.
-2. On the dashboard host, set `VITE_API_URL` to the API's public URL and redeploy, because Vite bakes it in at build time.
-3. Put the same key in each laptop's `agent.config.json`.
+| Service | Setting |
+|---|---|
+| Render (web service) | Root directory `backend`; build `pip install -r requirements.txt`; start `uvicorn main:app --host 0.0.0.0 --port $PORT`; environment: `DATABASE_URL`, `INGEST_KEY` (optionally `DASHBOARD_KEY`) |
+| Vercel (project) | Root directory `frontend`; framework Vite; build `npm run build`; output `dist`; environment `VITE_API_URL=https://dbsentinel.onrender.com` (no trailing slash) |
 
-On free hosting tiers an idle API can take up to a minute to wake up, so the first dashboard load or agent request can be slow. The agent retries by itself.
+Redeploy the dashboard after changing `VITE_API_URL`, because Vite bakes it in at build time. Put the same ingest key in each laptop's agent. On free hosting tiers an idle API can take up to a minute to wake up; the agent retries by itself.
 
 ## API endpoints
 
-All read endpoints accept `?device_id=...`. Without it, the most recently seen device is used.
+All read endpoints accept `?device_id=...`. Without it, the most recently seen device is used. When `DASHBOARD_KEY` is set, every endpoint except `/api/health` and `/api/ingest` needs `X-Dashboard-Key`.
 
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/ingest` | Agent → server snapshot. Needs the `X-API-Key` header. Body is limited to 1 MB |
-| `GET /api/health` | API status, evidence-store connection, number of devices |
-| `GET /api/devices` | Devices with last-seen time and online flag |
-| `GET /api/overview` | Latest OS/database state, recent history, current alerts |
-| `GET /api/os` | OS metrics, volumes and processes |
-| `GET /api/database` | PostgreSQL sessions, queries and lock relationships |
-| `GET /api/history` | Up to 1,000 stored snapshots (CPU, memory, disk, connections) |
-| `GET /api/events` | Saved events |
-| `GET /api/forensics` | Snapshots, events and investigation notes |
-| `POST /api/investigation-notes` | Save a note, optionally linked to an event |
+| `GET /api/health` | API status, evidence-store connection, number of devices, whether a dashboard key is required |
+| `GET /api/devices` | Devices with last-seen time and online flag, and the API version |
+| `GET /api/dashboard` | Everything one dashboard refresh needs, for one device, in one transaction: state, processes, alerts, history, incidents, notes |
+| `GET /api/overview`, `/api/os`, `/api/database` | Parts of the same data |
+| `GET /api/history` | Up to 1,000 stored snapshots (CPU, memory, disk, connections, disk throughput) |
+| `GET /api/events` | Stored incidents with `active`, `resolved_at`, `occurrences` and `duration_seconds` |
+| `GET /api/forensics` | Snapshots, incidents and investigation notes |
+| `POST /api/investigation-notes` | Save a note, optionally linked to an incident (`event_id`) |
 | `GET /api/settings` | Configuration status and record counts, without secrets |
 
-`/api/overview`, `/api/os`, `/api/database` answer 404 until a device has reported. When the evidence database is unreachable, the data endpoints answer 503 with a generic message (no connection details), while `/api/health` and `/api/settings` still answer 200 and report the problem.
+`/api/overview`, `/api/os`, `/api/database` and `/api/dashboard` answer 404 until a device has reported. When the evidence database is unreachable, the data endpoints answer 503 with a generic message (no connection details), while `/api/health` still answers 200 and reports the problem.
+
+**Abuse limits:** after 10 failed key attempts within a minute, an address is locked out of that key for a minute (429); notes are limited to 30 per minute per address. These counters live in memory, per server process.
 
 ## PostgreSQL tables used by DBSentinel
 
@@ -155,25 +165,41 @@ All read endpoints accept `?device_id=...`. Without it, the most recently seen d
 |---|---|
 | `dbs_devices` | One row per device: name, host, platform, agent version, first/last seen, and its latest full snapshot (JSONB) |
 | `dbs_snapshots` | Timestamped CPU, memory, disk, connection counts and a JSONB payload, per device |
-| `dbs_events` | Detected conditions with evidence, severity, first/last seen and an occurrence count, per device |
-| `dbs_investigation_notes` | Operator notes, linked to a device and optionally an event |
+| `dbs_events` | Incidents: start, last sighting, snapshot count, `resolved_at`, evidence, and the rule id (in `details`), per device |
+| `dbs_investigation_notes` | Operator notes, linked to a device and optionally an incident |
+
+## Tests
+
+```powershell
+# backend + agent: need a PostgreSQL. Either set TEST_DATABASE_URL (a server where the user may create
+# databases) or install the optional embedded server that the dev requirements include.
+pip install -r backend/requirements-dev.txt -r agent/requirements-dev.txt
+python -m pytest backend
+python -m pytest agent
+
+cd frontend
+npm test            # dashboard logic (recommendations, thresholds, formatting)
+```
+
+`.github/workflows/ci.yml` runs the same checks on every push and pull request: backend and agent tests against a PostgreSQL 16 service, the agent tests on Windows, and the dashboard tests and build.
 
 ## Demo plan for viva
 
 1. Show the evidence database in pgAdmin/psql and `/api/health` reporting it connected.
 2. Show the dashboard with no agent: "No device connected yet".
-3. Start the agent on the laptop (`dbsentinel-agent.exe`). Show it appearing in the device dropdown within seconds, and explain that the numbers are the laptop's, not the server's.
-4. Walk through Overview and OS Monitor (CPU, memory, disk, processes with I/O).
+3. Open the agent on the laptop. The guided setup appears; show it appearing in the device dropdown within seconds, and explain that the numbers are the laptop's, not the server's.
+4. Walk through Overview (tiles turn amber/red near the alert thresholds) and OS Monitor (processes with I/O, disk throughput chart).
 5. If PostgreSQL is configured on the laptop, open Database Monitor. To show a lock wait, open two psql sessions: run `BEGIN; LOCK TABLE some_table IN ACCESS EXCLUSIVE MODE;` in the first and `SELECT count(*) FROM some_table;` in the second. The blocked session appears with both PIDs.
-6. Open Event Correlation to explain how OS and database signals are compared over time.
-7. Save an investigation note, then `SELECT * FROM dbs_investigation_notes;` to show it stored.
-8. Show `SELECT * FROM dbs_devices;`, `SELECT * FROM dbs_snapshots ORDER BY id DESC LIMIT 5;` and `SELECT * FROM dbs_events ORDER BY id DESC LIMIT 10;`.
+6. Open Incidents & Forensics: the live conditions, the stored incident history (start, duration, snapshots, status), then Investigate an incident and save a note. Show it under Audit Trail with its incident.
+7. Open Safe Response: the recommendations come from the conditions active right now.
+8. Show `SELECT * FROM dbs_devices;`, `SELECT id, message, timestamp, last_seen, occurrences, resolved_at FROM dbs_events ORDER BY id DESC LIMIT 10;` and `SELECT * FROM dbs_investigation_notes;`.
 9. Stop the agent and show the device turn offline within about 15 seconds.
 
 ## Troubleshooting
 
 - **"No device connected yet":** no agent has reported. Run `dbsentinel-agent.exe --once` on the laptop and read the message (401 means the key does not match, "cannot reach" means the URL or network).
 - **Dashboard says "API disconnected":** the API is down, waking up, or `VITE_API_URL` points to the wrong place.
+- **The dashboard asks for a key:** `DASHBOARD_KEY` is set on the server. Use that key. After 10 wrong attempts within a minute the server refuses further attempts from your address for a minute.
 - **`/api/ingest` returns 503 "INGEST_KEY is not configured":** set `INGEST_KEY` on the server.
 - **Connection refused / password authentication failed (server):** check that PostgreSQL is running and `DATABASE_URL` in `backend/.env` is right, then restart uvicorn.
 - **Permission denied for schema public:** give the configured user create privileges on the schema, or make it the database owner.
@@ -184,10 +210,11 @@ All read endpoints accept `?device_id=...`. Without it, the most recently seen d
 
 This is an educational prototype, not a production security appliance.
 
-- **No user login.** Anyone who can reach the API can read the dashboard data (including process names and query text) and save notes. Agents authenticate with one shared `INGEST_KEY`, and the API cannot tell agents apart. Put it behind a private network, or add authentication, before real use.
+- **No user accounts.** The optional `DASHBOARD_KEY` is one shared secret for everyone who may view the dashboard. Without it, anyone who can reach the API can read the dashboard data (including process names and query text) and save notes. Agents authenticate with one shared `INGEST_KEY`, and the API cannot tell agents apart. Use HTTPS only, and put it behind a private network or add real authentication before real use.
 - **Windows agent only.** The agent is built and tested on Windows.
 - Snapshots sent while the API is unreachable are dropped, not replayed.
-- Event counts record how many snapshots observed a condition, not how many separate incidents occurred. A long-running condition stays one row.
+- Incidents end 30 seconds after the last sighting, so a condition that flickers faster than that stays one incident.
 - Per-process disk I/O counters are cumulative since the process started, and Windows hides a few protected processes unless the agent runs as Administrator.
-- Correlation leads do not prove causality, and a lock wait is not automatically a deadlock.
+- Correlation leads do not prove causality, and a lock wait is not automatically a deadlock. `CORR-MEM-DB` can only see PostgreSQL processes among the 100 the agent sends.
+- Rate limits are per server process and in memory; they reset on restart.
 - There is no log ingestion from PostgreSQL or the OS, and no automatic remediation.

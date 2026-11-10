@@ -193,8 +193,12 @@ class Console:
 
     def read_secret(self, prompt):
         """Read a secret and echo one mask character per key, so the user can see that typing registers."""
-        interactive = os.name == "nt" and getattr(sys.stdin, "isatty", lambda: False)()
-        if not interactive:
+        typed = sys.stdin is not None and getattr(sys.stdin, "isatty", lambda: False)()
+        if not typed:                          # input is piped from a file or another program: nothing to hide
+            self.out.write(prompt)
+            self.out.flush()
+            return (sys.stdin.readline() if sys.stdin is not None else "").strip()
+        if os.name != "nt":
             return getpass.getpass(prompt)
         import msvcrt
         self.out.write(prompt)
