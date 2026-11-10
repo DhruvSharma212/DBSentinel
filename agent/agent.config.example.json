@@ -1,0 +1,11 @@
+{
+  "api_url": "https://dbsentinel.onrender.com",
+  "api_key": "PASTE-THE-INGEST_KEY-FROM-THE-SERVER",
+  "device_name": "",
+  "interval_seconds": 5,
+  "postgres": {
+    "enabled": true,
+    "dsn": "postgresql://postgres:YOUR_PASSWORD@localhost:5432/postgres",
+    "send_query_text": true
+  }
+}
